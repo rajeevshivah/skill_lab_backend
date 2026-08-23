@@ -83,6 +83,41 @@ router.get('/:id', protect, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// POST /api/cycles/bulk  (admin) — create a cycle on the same dates for several batches.
+// Each batch gets its OWN per-batch number. Batches with a date overlap are skipped.
+router.post('/bulk', protect, superadminOnly, async (req, res) => {
+  try {
+    const { batches, name, startDate, endDate } = req.body;
+    if (!Array.isArray(batches) || !batches.length || !startDate || !endDate)
+      return res.status(400).json({ message: 'Batches, start and end dates required' });
+
+    const s = dayKey(startDate), e = dayKey(endDate);
+    if (e < s) return res.status(400).json({ message: 'End date is before start date' });
+
+    const created = [], skipped = [];
+    for (const batchId of batches) {
+      const batchDoc = await Batch.findById(batchId);
+      if (!batchDoc) { skipped.push({ batchId, reason: 'batch not found' }); continue; }
+
+      const overlap = await Cycle.findOne({ batch: batchId, startDate: { $lte: e }, endDate: { $gte: s } });
+      if (overlap) { skipped.push({ batchId, name: batchDoc.name, reason: `overlaps Cycle ${overlap.number}` }); continue; }
+
+      const last = await Cycle.findOne({ batch: batchId }).sort('-number');
+      const num = last ? last.number + 1 : 1;
+      try {
+        const c = await Cycle.create({
+          batch: batchId, semester: batchDoc.semester, number: num, name: name || '',
+          startDate: s, endDate: e, createdBy: req.user._id,
+        });
+        created.push({ batchId, name: batchDoc.name, number: num, cycleId: c._id });
+      } catch (err) {
+        skipped.push({ batchId, name: batchDoc.name, reason: 'could not create' });
+      }
+    }
+    res.status(201).json({ created, skipped, createdCount: created.length, skippedCount: skipped.length });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
 // POST /api/cycles  (admin) — create a cycle; enforce non-overlapping dates per batch
 router.post('/', protect, superadminOnly, async (req, res) => {
   try {
