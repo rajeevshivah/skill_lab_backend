@@ -26,6 +26,7 @@ app.use('/api/students',  require('./routes/students'));
 app.use('/api/plans',     require('./routes/plans'));
 app.use('/api/logs',      require('./routes/logs'));
 app.use('/api/toppers',   require('./routes/toppers'));
+app.use('/api/cycles',    require('./routes/cycles'));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
