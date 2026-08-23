@@ -56,7 +56,10 @@ router.get('/oversight', protect, async (req, res) => {
     const active = await Semester.findOne({ status: 'active' });
     if (!active) return res.json({ semester: null, rows: [] });
 
-    const batches = await Batch.find({ semester: active._id }).populate('trainers', 'name');
+    // Superadmin sees every batch; a trainer/co-trainer sees only their own.
+    const batchFilter = { semester: active._id };
+    if (req.user.role !== 'superadmin') batchFilter.trainers = req.user._id;
+    const batches = await Batch.find(batchFilter).populate('trainers', 'name');
     const today = dayKey(new Date());
 
     const rows = [];
