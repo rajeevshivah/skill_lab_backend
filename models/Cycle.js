@@ -13,7 +13,14 @@ const reportSchema = new mongoose.Schema({
   topicsPlanned:   { type: Number, default: null },
   topicsCompleted: { type: Number, default: null },
   // top3 captured as text so the report stays stable even if toppers change later
-  top3: [{ rank: Number, name: String, roll: String }],
+  top3: [{
+    rank:   Number,
+    student:{ type: mongoose.Schema.Types.ObjectId, ref: 'Student', default: null },
+    name:   String,
+    roll:   String,
+    github: { type: String, default: '' },
+    photo:  { data: { type: String, default: null }, contentType: { type: String, default: null } },
+  }],
 
   // ---- Trainer structured (trackable across cycles) ----
   syllabusCoverage: { type: String, enum: ['on-track', 'behind', 'ahead', ''], default: '' },

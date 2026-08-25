@@ -46,6 +46,28 @@ async function computeLiveData(cycle) {
   return { avgAttendance: attPct, sessionsHeld, topicsPlanned, topicsCompleted, top3, totalStudents };
 }
 
+// GET /api/cycles/halloffame?semester=ID  (PUBLIC) — cycles that have top-3, newest first
+// Shape for the public page: grouped client-side as Cycle -> Batch -> top3
+router.get('/halloffame', async (req, res) => {
+  try {
+    const filter = { 'report.top3.0': { $exists: true } }; // has at least one top3 entry
+    if (req.query.semester) filter.semester = req.query.semester;
+    const cycles = await Cycle.find(filter)
+      .populate('batch', 'name track')
+      .sort('-startDate');
+    const out = cycles.map(c => ({
+      _id: c._id, number: c.number, name: c.name,
+      startDate: c.startDate, endDate: c.endDate,
+      batch: c.batch ? { _id: c.batch._id, name: c.batch.name, track: c.batch.track } : null,
+      top3: (c.report.top3 || []).sort((a,b)=>a.rank-b.rank).map(t => ({
+        rank: t.rank, name: t.name, roll: t.roll, github: t.github,
+        photo: t.photo?.data ? `data:${t.photo.contentType};base64,${t.photo.data}` : null,
+      })),
+    }));
+    res.json({ cycles: out });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
 // GET /api/cycles?batch=ID  or ?semester=ID
 router.get('/', protect, async (req, res) => {
   try {
@@ -224,13 +246,32 @@ router.put('/:id/report', protect, async (req, res) => {
       return res.status(400).json({ message: 'The report is not open yet.' });
 
     const allowed = [
-      'avgAttendance','sessionsHeld','topicsPlanned','topicsCompleted','top3',
+      'avgAttendance','sessionsHeld','topicsPlanned','topicsCompleted',
       'syllabusCoverage','coverageNote','submittedCount','totalStudents',
       'performanceRating','trainerConfidence','problemsFaced','improvementNeeded',
       'standoutStudents','strugglingStudents','topicsNotCovered','reflection',
       'projectTitle','projectNote',
     ];
     for (const k of allowed) if (k in req.body) cycle.report[k] = req.body[k];
+
+    // top3: sanitize photos (accept data-URL, store as {data,contentType}); cap 2MB each
+    if (Array.isArray(req.body.top3)) {
+      const MAX = 2 * 1024 * 1024;
+      cycle.report.top3 = req.body.top3.map(t => {
+        let photo = { data: null, contentType: null };
+        if (t.photo && typeof t.photo === 'string') {
+          const m = t.photo.match(/^data:(image\/\w+);base64,(.+)$/);
+          if (m && Buffer.from(m[2], 'base64').length <= MAX) photo = { data: m[2], contentType: m[1] };
+        } else if (t.photo && t.photo.data) {
+          photo = t.photo; // already stored shape (unchanged on re-save)
+        }
+        return {
+          rank: t.rank, student: t.student || null,
+          name: t.name || '', roll: t.roll || '', github: t.github || '', photo,
+        };
+      });
+    }
+
     cycle.report.submitted = true;
     cycle.report.submittedBy = req.user._id;
     cycle.report.submittedAt = new Date();
