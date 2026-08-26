@@ -10,6 +10,10 @@ const batchSchema = new mongoose.Schema({
   // One or more trainers assigned to this batch
   trainers:    [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   isActive:    { type: Boolean, default: true },
+  // Once the roster is finalised (track segregation done), attendance averages
+  // become "true" instead of provisional.
+  rosterLocked:{ type: Boolean, default: false },
+  rosterLockedAt: { type: Date, default: null },
   createdBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 

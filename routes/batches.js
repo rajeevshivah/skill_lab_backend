@@ -117,4 +117,18 @@ router.delete('/:id', protect, superadminOnly, async (req, res) => {
   }
 });
 
+// PATCH /api/batches/:id/roster-lock  (admin) — finalise/unfinalise the roster
+router.patch('/:id/roster-lock', protect, superadminOnly, async (req, res) => {
+  try {
+    const { locked } = req.body;
+    const batch = await Batch.findByIdAndUpdate(
+      req.params.id,
+      { rosterLocked: !!locked, rosterLockedAt: locked ? new Date() : null },
+      { new: true }
+    );
+    if (!batch) return res.status(404).json({ message: 'Batch not found' });
+    res.json({ batch });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
 module.exports = router;
