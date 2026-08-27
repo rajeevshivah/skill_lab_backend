@@ -29,6 +29,7 @@ app.use('/api/toppers',   require('./routes/toppers'));
 app.use('/api/cycles',    require('./routes/cycles'));
 app.use('/api/marks',     require('./routes/cyclemarks'));
 app.use('/api/cycleplans', require('./routes/cycleplans'));
+app.use('/api/search',    require('./routes/search'));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
 

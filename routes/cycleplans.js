@@ -55,4 +55,22 @@ router.put('/:cycleId', protect, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// GET /api/cycleplans/for-date?batch=ID&date=YYYY-MM-DD
+// Returns the planned class (if any) for that batch/date, by scanning the cycle
+// whose date range contains the date and matching the class entry's date.
+router.get('/for-date/lookup', protect, async (req, res) => {
+  try {
+    const { batch, date } = req.query;
+    if (!batch || !date) return res.status(400).json({ message: 'batch and date required' });
+    const d = new Date(date); d.setHours(12,0,0,0);
+    // find the cycle for this batch covering the date
+    const cycle = await Cycle.findOne({ batch, startDate: { $lte: d }, endDate: { $gte: d } });
+    if (!cycle) return res.json({ planned: null, cycle: null });
+    const plan = await CyclePlan.findOne({ cycle: cycle._id }).populate('classes.trainer', 'name');
+    if (!plan) return res.json({ planned: null, cycle: { _id: cycle._id, number: cycle.number } });
+    const planned = (plan.classes || []).find(c => c.date === date) || null;
+    res.json({ planned, cycle: { _id: cycle._id, number: cycle.number } });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
 module.exports = router;
