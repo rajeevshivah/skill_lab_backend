@@ -4,7 +4,7 @@ const Plan     = require('../models/Plan');
 const Batch    = require('../models/Batch');
 const Student  = require('../models/Student');
 const Semester = require('../models/Semester');
-const { protect, canAccessBatch } = require('../middleware/auth');
+const { protect, canAccessBatch, noCotrainer } = require('../middleware/auth');
 const router   = express.Router();
 
 function dayKey(d) {
@@ -13,9 +13,17 @@ function dayKey(d) {
   return dt;
 }
 
-// Recompute a student's presentCount/totalSessions from all logs of their batch
+// Sessions that count towards attendance: logs where the roll call was actually
+// taken. Logs written before this field existed are treated as counted when
+// they carry attendance entries, so historical numbers don't move.
+const countsForAttendance = (log) =>
+  log.attendanceTaken || (Array.isArray(log.attendance) && log.attendance.length > 0);
+
+// Recompute presentCount/totalSessions for every student in a batch.
+// One bulkWrite instead of one save() per student — this used to fire 145
+// sequential writes every time a trainer saved a daily log.
 async function recomputeBatchStats(batchId) {
-  const logs = await DailyLog.find({ batch: batchId });
+  const logs = (await DailyLog.find({ batch: batchId })).filter(countsForAttendance);
   const totalSessions = logs.length;
   const presentMap = {}; // studentId -> present count
   for (const log of logs) {
@@ -24,12 +32,17 @@ async function recomputeBatchStats(batchId) {
       presentMap[id] = (presentMap[id] || 0) + (a.present ? 1 : 0);
     }
   }
-  const students = await Student.find({ batch: batchId });
-  for (const s of students) {
-    s.stats.totalSessions = totalSessions;
-    s.stats.presentCount  = presentMap[s._id.toString()] || 0;
-    await s.save();
-  }
+  const students = await Student.find({ batch: batchId }).select('_id');
+  if (!students.length) return;
+  await Student.bulkWrite(students.map(s => ({
+    updateOne: {
+      filter: { _id: s._id },
+      update: { $set: {
+        'stats.totalSessions': totalSessions,
+        'stats.presentCount':  presentMap[s._id.toString()] || 0,
+      } },
+    },
+  })));
 }
 
 // GET /api/logs?batch=ID   or   ?semester=ID   (recent logs)
@@ -111,12 +124,27 @@ router.post('/', protect, async (req, res) => {
     if (!batchDoc) return res.status(404).json({ message: 'Batch not found' });
 
     const d = dayKey(date);
+    const existing = await DailyLog.findOne({ batch, date: d });
+
+    // Merge attendance instead of replacing it. Two trainers share some batches;
+    // the old code let whoever saved second wipe the other's roll call.
+    const incoming = Array.isArray(attendance) ? attendance : [];
+    const merged = new Map();
+    if (existing) for (const a of existing.attendance) merged.set(a.student.toString(), !!a.present);
+    for (const a of incoming) if (a && a.student) merged.set(a.student.toString(), !!a.present);
+
+    const contributors = new Set((existing?.contributors || []).map(String));
+    contributors.add(req.user._id.toString());
+
     const update = {
       batch, semester: batchDoc.semester, date: d, loggedBy: req.user._id,
       topicsCovered: topicsCovered || [],
       status: status || 'done',
       notes: notes || '', prepLink: prepLink || '',
-      attendance: attendance || [],
+      attendance: [...merged].map(([student, present]) => ({ student, present })),
+      // Sticks once true: a later save that carries no attendance can't undo it.
+      attendanceTaken: incoming.length > 0 || !!existing?.attendanceTaken,
+      contributors: [...contributors],
     };
     const log = await DailyLog.findOneAndUpdate(
       { batch, date: d }, update, { new: true, upsert: true, setDefaultsOnInsert: true }
@@ -146,8 +174,8 @@ router.post('/', protect, async (req, res) => {
   }
 });
 
-// DELETE /api/logs/:id  (superadmin or batch trainer)
-router.delete('/:id', protect, async (req, res) => {
+// DELETE /api/logs/:id  (superadmin or batch trainer — not co-trainers)
+router.delete('/:id', protect, noCotrainer, async (req, res) => {
   try {
     const log = await DailyLog.findById(req.params.id);
     if (!log) return res.status(404).json({ message: 'Log not found' });
@@ -161,5 +189,8 @@ router.delete('/:id', protect, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
+// Exported for tests — pure helper, no database involved.
+router.__test = { countsForAttendance };
 
 module.exports = router;

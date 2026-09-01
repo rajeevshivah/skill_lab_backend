@@ -19,6 +19,13 @@ const dailyLogSchema = new mongoose.Schema({
   prepLink: { type: String, default: '' },
   // Roll-wise attendance
   attendance: [attendanceEntrySchema],
+  // Was attendance actually taken for this session? A log saved without it must
+  // NOT count towards anyone's attendance denominator — otherwise a trainer who
+  // forgets the roll call silently drops every student's percentage.
+  attendanceTaken: { type: Boolean, default: false },
+  // Every trainer who has contributed to this day's log (two trainers can share
+  // a batch and must not silently overwrite one another).
+  contributors: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 }, { timestamps: true });
 
 // One log per batch per day

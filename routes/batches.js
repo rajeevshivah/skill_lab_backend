@@ -6,8 +6,8 @@ const Semester= require('../models/Semester');
 const { protect, superadminOnly } = require('../middleware/auth');
 const router  = express.Router();
 
-// GET /api/batches?semester=ID   (public read for leaderboard; trainers see own)
-router.get('/', async (req, res) => {
+// GET /api/batches?semester=ID   (staff only — the public page uses /cycles/halloffame)
+router.get('/', protect, async (req, res) => {
   try {
     const filter = {};
     if (req.query.semester) filter.semester = req.query.semester;
@@ -39,7 +39,7 @@ router.get('/mine', protect, async (req, res) => {
 });
 
 // GET /api/batches/:id
-router.get('/:id', async (req, res) => {
+router.get('/:id', protect, async (req, res) => {
   try {
     const batch = await Batch.findById(req.params.id)
       .populate('trainers', 'name email role')
@@ -101,16 +101,27 @@ router.patch('/:id', protect, superadminOnly, async (req, res) => {
   }
 });
 
-// DELETE /api/batches/:id  (superadmin) — removes batch, its plan, students, logs
+// DELETE /api/batches/:id  (superadmin)
+// Removes the batch and EVERYTHING that points at it. Cycles, cycle marks and
+// cycle plans used to survive here and were left dangling at a batch that no
+// longer existed.
 router.delete('/:id', protect, superadminOnly, async (req, res) => {
   try {
-    const Topper = require('../models/Topper');
-    const DailyLog = require('../models/DailyLog');
-    await Plan.deleteOne({ batch: req.params.id });
-    await Student.deleteMany({ batch: req.params.id });
-    await DailyLog.deleteMany({ batch: req.params.id });
-    await Topper.deleteMany({ batch: req.params.id });
-    await Batch.findByIdAndDelete(req.params.id);
+    const Topper    = require('../models/Topper');
+    const DailyLog  = require('../models/DailyLog');
+    const Cycle     = require('../models/Cycle');
+    const CycleMark = require('../models/CycleMark');
+    const CyclePlan = require('../models/CyclePlan');
+    const id = req.params.id;
+
+    await Plan.deleteOne({ batch: id });
+    await Student.deleteMany({ batch: id });
+    await DailyLog.deleteMany({ batch: id });
+    await Topper.deleteMany({ batch: id });
+    await CycleMark.deleteMany({ batch: id });
+    await CyclePlan.deleteMany({ batch: id });
+    await Cycle.deleteMany({ batch: id });
+    await Batch.findByIdAndDelete(id);
     res.json({ message: 'Batch and all its data deleted' });
   } catch (err) {
     res.status(500).json({ message: err.message });

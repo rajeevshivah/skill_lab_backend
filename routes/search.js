@@ -12,6 +12,9 @@ router.get('/', protect, async (req, res) => {
     const q = (req.query.q || '').trim();
     if (q.length < 2) return res.json({ students: [], batches: [], cycles: [] });
     const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    // "cycle 3", "Cycle3" or plain "3" → 3
+    const numMatch = q.match(/(?:^|\s|cycle)\s*(\d{1,3})\s*$/i);
+    const cycleNumber = numMatch ? parseInt(numMatch[1], 10) : null;
 
     // determine which batches this user may see
     let batchScope = null; // null = all
@@ -28,8 +31,12 @@ router.get('/', protect, async (req, res) => {
         .select('name roll batch').populate('batch', 'name').limit(15),
       Batch.find({ ...batchFilter, $or: [{ name: rx }, { track: rx }] })
         .select('name track').limit(10),
-      Cycle.find({ ...inScope, $or: [{ name: rx }] })
-        .select('number name batch').populate('batch', 'name').limit(10),
+      // Cycles are usually unnamed, so match the number too — "cycle 3" and a
+      // bare "3" both find Cycle 3. Name-only search returned nothing at all.
+      Cycle.find({ ...inScope, $or: [
+        { name: rx },
+        ...(cycleNumber !== null ? [{ number: cycleNumber }] : []),
+      ] }).select('number name batch').populate('batch', 'name').limit(10),
     ]);
 
     res.json({

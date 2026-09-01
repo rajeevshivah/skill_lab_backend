@@ -4,8 +4,8 @@ const Batch   = require('../models/Batch');
 const { protect, canAccessBatch } = require('../middleware/auth');
 const router  = express.Router();
 
-// GET /api/plans/:batchId  (public read)
-router.get('/:batchId', async (req, res) => {
+// GET /api/plans/:batchId  (staff only)
+router.get('/:batchId', protect, async (req, res) => {
   try {
     let plan = await Plan.findOne({ batch: req.params.batchId });
     res.json({ plan: plan || null });

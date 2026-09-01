@@ -38,14 +38,25 @@ async function start() {
   await mongoose.connect(process.env.MONGODB_URI);
   console.log('MongoDB connected');
 
+  // Seed the first superadmin ONLY when the database has none AND a password is
+  // supplied through the environment. No credential is hardcoded here, and
+  // nothing is printed to the logs — a deploy log is not a private place.
   const existing = await User.findOne({ role: 'superadmin' });
   if (!existing) {
-    await User.create({
-      name: 'Super Admin', email: 'admin@sheat.ac.in',
-      password: 'sheat@admin2026', role: 'superadmin'
-    });
-    console.log('Default superadmin created: admin@sheat.ac.in / sheat@admin2026');
-    console.log('CHANGE THIS PASSWORD after first login.');
+    const seedEmail    = process.env.SEED_ADMIN_EMAIL;
+    const seedPassword = process.env.SEED_ADMIN_PASSWORD;
+    if (seedEmail && seedPassword && seedPassword.length >= 10) {
+      await User.create({
+        name: process.env.SEED_ADMIN_NAME || 'Super Admin',
+        email: seedEmail, password: seedPassword, role: 'superadmin',
+      });
+      console.log(`Seeded the first superadmin (${seedEmail}). Remove SEED_ADMIN_PASSWORD from the environment now.`);
+    } else {
+      console.warn(
+        'No superadmin exists and no valid seed credentials were provided. ' +
+        'Set SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD (10+ characters), restart once, then remove them.'
+      );
+    }
   }
 
   const PORT = process.env.PORT || 5000;

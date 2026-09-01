@@ -9,21 +9,28 @@ const router    = express.Router();
 
 function dayKey(d) { const dt = new Date(d); dt.setHours(0,0,0,0); return dt; }
 
-// Per-student attendance % within a cycle's date range (safe even if roster unfinalised).
+const countsForAttendance = (log) =>
+  log.attendanceTaken || (Array.isArray(log.attendance) && log.attendance.length > 0);
+
+// Per-student attendance % within a cycle's date range.
+//
+// The denominator is the number of sessions the BATCH held in the window — the
+// same rule the roster and Placement Track use. It used to be per-student
+// ("sessions where this student was listed"), so the same student showed one
+// percentage on the batch page and a different one here.
 async function studentAttendance(batchId, start, end) {
   const s = dayKey(start), e = dayKey(end); e.setHours(23,59,59,999);
-  const logs = await DailyLog.find({ batch: batchId, date: { $gte: s, $lte: e } });
-  const present = {}, seen = {};
+  const logs = (await DailyLog.find({ batch: batchId, date: { $gte: s, $lte: e } }))
+    .filter(countsForAttendance);
+  const sessions = logs.length;
+  const present = {};
   for (const log of logs) {
     for (const a of log.attendance) {
       const id = a.student.toString();
-      seen[id] = (seen[id] || 0) + 1;
       present[id] = (present[id] || 0) + (a.present ? 1 : 0);
     }
   }
-  const pct = {};
-  for (const id of Object.keys(seen)) pct[id] = seen[id] ? Math.round((present[id] / seen[id]) * 100) : 0;
-  return pct;
+  return { sessions, pctFor: (id) => sessions ? Math.round(((present[id] || 0) / sessions) * 100) : null };
 }
 
 // GET /api/marks/:cycleId  — the marks sheet: every roster student + their mark row
@@ -43,7 +50,7 @@ router.get('/:cycleId', protect, async (req, res) => {
       const m = markByStudent[s._id.toString()];
       return {
         student: s._id, name: s.name, roll: s.roll,
-        attendancePct: attendance[s._id.toString()] ?? null,
+        attendancePct: attendance.pctFor(s._id.toString()),
         status: m ? m.status : 'not-evaluated',
         assessment: m ? m.assessment : null,
         project: m ? m.project : null,
@@ -58,6 +65,7 @@ router.get('/:cycleId', protect, async (req, res) => {
       cycle: { _id: cycle._id, number: cycle.number, name: cycle.name, status: cycle.status,
                batch: cycle.batch, startDate: cycle.startDate, endDate: cycle.endDate },
       rosterLocked: !!cycle.batch.rosterLocked,
+      sessionsInCycle: attendance.sessions,
       rows,
     });
   } catch (err) { res.status(500).json({ message: err.message }); }
@@ -73,30 +81,56 @@ router.put('/:cycleId', protect, async (req, res) => {
       return res.status(403).json({ message: 'Not your batch' });
 
     const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
-    for (const r of rows) {
-      if (!r.student) continue;
-      let category = '';
-      let assessment = null, project = null;
+
+    // Validate the WHOLE sheet before writing any of it. This used to be a
+    // row-by-row loop, so one out-of-range mark threw halfway through and left
+    // the sheet half-saved with a 500 and no indication of where it stopped.
+    const errors = [], ops = [];
+    const num = (v) => (v == null || v === '' ? 0 : Number(v));
+
+    rows.forEach((r, i) => {
+      if (!r.student) return;
+      const label = r.name || r.roll || `row ${i + 1}`;
+      let assessment = null, project = null, category = '';
+
       if (r.status === 'evaluated') {
-        assessment = r.assessment == null || r.assessment === '' ? 0 : Number(r.assessment);
-        project    = r.project == null || r.project === '' ? 0 : Number(r.project);
+        assessment = num(r.assessment);
+        project    = num(r.project);
+        if (!Number.isFinite(assessment) || assessment < 0 || assessment > 100)
+          errors.push(`${label}: assessment must be a number from 0 to 100`);
+        if (!Number.isFinite(project) || project < 0 || project > 100)
+          errors.push(`${label}: project must be a number from 0 to 100`);
         category = (r.categoryOverridden && r.category)
           ? r.category
           : CycleMark.categoryFromMarks(assessment, project);
+        if (!['excellent', 'moderate', 'basic', 'zero'].includes(category))
+          errors.push(`${label}: unknown category "${r.category}"`);
       }
-      await CycleMark.findOneAndUpdate(
-        { cycle: cycle._id, student: r.student },
-        {
-          cycle: cycle._id, batch: cycle.batch, semester: cycle.semester, student: r.student,
-          status: r.status === 'evaluated' ? 'evaluated' : 'not-evaluated',
-          assessment, project, category,
-          categoryOverridden: !!r.categoryOverridden,
-          remark: r.remark || '', updatedBy: req.user._id,
+
+      ops.push({
+        updateOne: {
+          filter: { cycle: cycle._id, student: r.student },
+          update: { $set: {
+            cycle: cycle._id, batch: cycle.batch, semester: cycle.semester, student: r.student,
+            status: r.status === 'evaluated' ? 'evaluated' : 'not-evaluated',
+            assessment, project, category,
+            categoryOverridden: !!r.categoryOverridden,
+            remark: String(r.remark || '').slice(0, 500),
+            updatedBy: req.user._id,
+          } },
+          upsert: true,
         },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
-    }
-    res.json({ saved: rows.length });
+      });
+    });
+
+    if (errors.length)
+      return res.status(400).json({
+        message: `Nothing was saved — ${errors.length} row(s) need fixing.`,
+        errors: errors.slice(0, 20),
+      });
+
+    if (ops.length) await CycleMark.bulkWrite(ops);
+    res.json({ saved: ops.length });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -105,6 +139,8 @@ router.get('/:cycleId/top3-suggestion', protect, async (req, res) => {
   try {
     const cycle = await Cycle.findById(req.params.cycleId);
     if (!cycle) return res.status(404).json({ message: 'Cycle not found' });
+    if (!(await canAccessBatch(req.user, cycle.batch)))
+      return res.status(403).json({ message: 'Not your batch' });
     const marks = await CycleMark.find({ cycle: cycle._id, status: 'evaluated' })
       .populate('student', 'name roll');
     const ranked = marks
@@ -121,6 +157,8 @@ router.get('/:cycleId/top3-suggestion', protect, async (req, res) => {
 // GET /api/marks/student/:studentId/history  — category trail across cycles (skips not-evaluated)
 router.get('/student/:studentId/history', protect, async (req, res) => {
   try {
+    const owner = await Student.findById(req.params.studentId).select('batch');
+    if (!owner) return res.status(404).json({ message: 'Student not found' });
     const marks = await CycleMark.find({ student: req.params.studentId, status: 'evaluated' })
       .populate('cycle', 'number name startDate')
       .sort('createdAt');

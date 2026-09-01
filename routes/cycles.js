@@ -11,6 +11,20 @@ const router   = express.Router();
 
 function dayKey(d) { const dt = new Date(d); dt.setHours(0,0,0,0); return dt; }
 
+// Toppers store the cycle as a free-text label ("Cycle 3"). Match on the number
+// the label contains, not on substring containment — `"Cycle 11".includes("1")`
+// was true, so Cycle 1 pulled in the toppers of 10, 11, 12 and 21.
+function labelNumber(label) {
+  const m = String(label ?? '').match(/\d+/);
+  return m ? parseInt(m[0], 10) : null;
+}
+// An unlabelled legacy topper belongs to whichever cycle asks for it.
+function topperBelongsToCycle(topperCycleLabel, cycleNumber) {
+  if (!topperCycleLabel) return true;
+  const n = labelNumber(topperCycleLabel);
+  return n === null || n === cycleNumber;
+}
+
 // Compute live report numbers for a cycle from daily logs / plan / toppers in its date range.
 async function computeLiveData(cycle) {
   const start = dayKey(cycle.startDate);
@@ -34,9 +48,8 @@ async function computeLiveData(cycle) {
   const topicsCompleted = plan ? plan.topics.filter(t => t.status === 'done').length : 0;
 
   const toppers = await Topper.find({ batch: cycle.batch }).populate('student', 'name roll');
-  // toppers store a cycle label; match by number if present, else take all for the batch
   const top3 = toppers
-    .filter(t => !t.cycle || t.cycle.toString().includes(String(cycle.number)))
+    .filter(t => topperBelongsToCycle(t.cycle, cycle.number))
     .sort((a,b) => a.rank - b.rank)
     .slice(0, 3)
     .map(t => ({ rank: t.rank, name: t.student?.name || '', roll: t.student?.roll || '' }));
@@ -280,12 +293,20 @@ router.put('/:id/report', protect, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// DELETE /api/cycles/:id  (admin)
+// DELETE /api/cycles/:id  (admin) — also removes the cycle's marks and class plan,
+// which used to be left behind pointing at a cycle that no longer existed.
 router.delete('/:id', protect, superadminOnly, async (req, res) => {
   try {
+    const CycleMark = require('../models/CycleMark');
+    const CyclePlan = require('../models/CyclePlan');
+    const removed = await CycleMark.deleteMany({ cycle: req.params.id });
+    await CyclePlan.deleteMany({ cycle: req.params.id });
     await Cycle.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Cycle deleted' });
+    res.json({ message: 'Cycle deleted', removedMarks: removed.deletedCount || 0 });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
+
+// Exported for tests — pure helpers, no database involved.
+router.__test = { labelNumber, topperBelongsToCycle };
 
 module.exports = router;
