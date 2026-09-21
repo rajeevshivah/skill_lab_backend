@@ -68,7 +68,21 @@ router.get('/halloffame', async (req, res) => {
     const cycles = await Cycle.find(filter)
       .populate('batch', 'name track')
       .sort('-startDate');
-    const out = cycles.map(c => ({
+
+    // Only the newest cycle per batch belongs on the board — otherwise an
+    // older cycle's top-3 (e.g. MERN Stack Cycle 1) keeps sitting alongside
+    // a newer one (Cycle 2) for the same batch/track forever. `cycles` is
+    // already newest-first, so keeping the first occurrence per batch is
+    // enough.
+    const seenBatch = new Set();
+    const latestPerBatch = cycles.filter(c => {
+      const key = c.batch?._id ? String(c.batch._id) : `no-batch-${c._id}`;
+      if (seenBatch.has(key)) return false;
+      seenBatch.add(key);
+      return true;
+    });
+
+    const out = latestPerBatch.map(c => ({
       _id: c._id, number: c.number, name: c.name,
       startDate: c.startDate, endDate: c.endDate,
       batch: c.batch ? { _id: c.batch._id, name: c.batch.name, track: c.batch.track } : null,
