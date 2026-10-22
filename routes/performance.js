@@ -135,7 +135,7 @@ router.patch('/cycle/:id', protect, superadminOnly, async (req, res) => {
       c.track.deadline = d;
     }
     if ('excusedNote' in b) c.track.excusedNote = String(b.excusedNote || '').slice(0, 300);
-    if ('tracked' in b) c.track.tracked = !!b.tracked;
+    if ('tracked' in b) { c.track.tracked = !!b.tracked; if (b.tracked && !c.track.trackedFrom) c.track.trackedFrom = new Date(); }
     if ('lead' in b || 'owners' in b) {
       const elig = await eligibleTrainers(c);
       const ok = (u) => u == null || u === '' || elig.some(t => sid(t) === String(u));
@@ -225,7 +225,7 @@ async function bulk(req, res, cycles) {
   }
   for (const c of cycles) {
     if (!c.track) c.track = {};
-    if ('tracked' in b) c.track.tracked = !!b.tracked;
+    if ('tracked' in b) { c.track.tracked = !!b.tracked; if (b.tracked && !c.track.trackedFrom) c.track.trackedFrom = new Date(); }
     if ('deadline' in b) c.track.deadline = deadline;
     c.markModified('track');
     await c.save();

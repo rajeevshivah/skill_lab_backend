@@ -157,7 +157,7 @@ router.post('/bulk', protect, superadminOnly, async (req, res) => {
       try {
         const c = await Cycle.create({
           batch: batchId, semester: batchDoc.semester, number: num, name: name || '',
-          startDate: s, endDate: e, createdBy: req.user._id, track: { tracked: true },
+          startDate: s, endDate: e, createdBy: req.user._id, track: { tracked: true, trackedFrom: new Date() },
         });
         created.push({ batchId, name: batchDoc.name, number: num, cycleId: c._id });
       } catch (err) {
@@ -197,7 +197,7 @@ router.post('/', protect, superadminOnly, async (req, res) => {
 
     const cycle = await Cycle.create({
       batch, semester: batchDoc.semester, number: num, name: name || '',
-      startDate: s, endDate: e, createdBy: req.user._id, track: { tracked: true },
+      startDate: s, endDate: e, createdBy: req.user._id, track: { tracked: true, trackedFrom: new Date() },
     });
     res.status(201).json({ cycle });
   } catch (err) {

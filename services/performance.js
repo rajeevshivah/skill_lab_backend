@@ -115,16 +115,22 @@ async function scoreCycle(cycle, now = new Date()) {
     top3:   deadlineItem(t.top3,   deadline, now, excused, WEIGHTS.top3),
   };
 
+  // Tracking only counts from the day it began: earlier class days are ignored,
+  // and the plan can't be due before tracking started (+2 days to fill it).
+  const from = t.trackedFrom || (t.tracked ? cycle.createdAt : null);
+  const fromYmd = from ? istYmd(from) : null;
   // Cycle plan — should exist before the cycle starts
   const startYmd = dayYmd(cycle.startDate);
+  const afterFrom = fromYmd ? istYmd(new Date(from).getTime() + 2 * DAY) : null;
+  const planDueYmd = afterFrom && afterFrom > startYmd ? afterFrom : startYmd;
   if (t.plan?.at) {
     if (t.plan.admin) items.plan = { state: 'admin', points: 0, max: WEIGHTS.plan, at: t.plan.at };
     else {
-      const lateDays = Math.max(0, (ymdToDay(istYmd(t.plan.at)) - ymdToDay(startYmd)) / DAY);
+      const lateDays = Math.max(0, (ymdToDay(istYmd(t.plan.at)) - ymdToDay(planDueYmd)) / DAY);
       items.plan = lateDays === 0 ? { state: 'on-time', points: 15, max: 15, at: t.plan.at }
         : { state: 'late', points: lateDays <= 3 ? 8 : 4, max: 15, at: t.plan.at, lateDays };
     }
-  } else if (istYmd(now) < startYmd) items.plan = { state: 'pending', points: 0, max: 0 };
+  } else if (planDueYmd === startYmd ? istYmd(now) < startYmd : istYmd(now) <= planDueYmd) items.plan = { state: 'pending', points: 0, max: 0, dueBy: planDueYmd };
   else items.plan = { state: 'missing', points: 0, max: WEIGHTS.plan };
 
   // Daily logs + attendance — every class day so far in the cycle
@@ -146,7 +152,7 @@ async function scoreCycle(cycle, now = new Date()) {
   for (const c of plan?.classes || []) if (c.date && c.date >= startYmd && c.date <= lastDay) days.add(c.date);
   const logDays = [];
   for (const d of [...days].sort()) {
-    if (d > lastDay) continue;
+    if (d > lastDay || (fromYmd && d < fromYmd)) continue;
     const l = byDay.get(d);
     const planned = plannedBy.has(d) && isEligible(plannedBy.get(d)) ? plannedBy.get(d) : null;
     if (!l) { if (d === today) continue; logDays.push({ date: d, state: 'missing', resp: planned || '*' }); continue; }
@@ -236,6 +242,7 @@ async function scoreCycle(cycle, now = new Date()) {
     lead: lead ? { id: sid(lead), name: lead.name } : null,
     owners: Object.fromEntries(Object.entries(owners).map(([k, v]) => [k, v ? { id: sid(v), name: v.name } : null])),
     perTrainer,
+    trackedFrom: from || null, planDue: planDueYmd,
     deadline, projectDate: projectDayOf(cycle), excusedNote: t.excusedNote || '',
     tracked: !!t.tracked, items, overall, completedAt,
     lateBy: completedAt && completedAt > deadline ? Math.round((completedAt - deadline) / DAY * 10) / 10 : 0,

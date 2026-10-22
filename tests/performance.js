@@ -69,9 +69,12 @@ const ymd = (d) => perf.dayYmd(d);
   ok('existing cycle defaults to untracked', old.track.tracked === false);
   const created = await http('POST', '/api/cycles', { token: T(admin), body: { batch: mern._id, number: 4, startDate: ymd(day(-10)), endDate: ymd(day(-3)) } });
   ok('cycle created via website is tracked', created.status === 201 && created.body.cycle.track.tracked === true, JSON.stringify(created.body).slice(0, 200));
+  ok('new cycle records when tracking began', !!created.body.cycle.track.trackedFrom);
+  // the scenarios below pretend tracking began at the start of the cycle
+  await Cycle.updateOne({ _id: created.body.cycle._id }, { $set: { 'track.trackedFrom': day(-11) } });
   const c4 = await Cycle.findById(created.body.cycle._id);
   const bulk = await http('POST', '/api/cycles/bulk', { token: T(admin), body: { batches: [bca._id], startDate: ymd(day(-10)), endDate: ymd(day(-3)) } });
-  await Cycle.updateOne({ _id: bulk.body.created[0].cycleId }, { $set: { number: 4 } }); // same round as Full Stack
+  await Cycle.updateOne({ _id: bulk.body.created[0].cycleId }, { $set: { number: 4, 'track.trackedFrom': day(-11) } }); // same round as Full Stack
   const b4 = await Cycle.findById(bulk.body.created[0].cycleId);
   ok('bulk-created cycle is tracked', b4.track.tracked === true);
 
@@ -207,7 +210,7 @@ const ymd = (d) => perf.dayYmd(d);
     const duo = await Batch.create({ name: 'Duo Batch', semester: sem._id, trainers: [A._id, B._id] });
     const st = await Student.create({ name: 'Ravi', roll: '901', batch: duo._id, semester: sem._id });
     const cy = await Cycle.create({ batch: duo._id, semester: sem._id, number: 7, startDate: day(-10), endDate: day(-3),
-      track: { tracked: true, deadline: new Date(Date.now() - 2 * DAY) } });
+      track: { tracked: true, trackedFrom: day(-11), deadline: new Date(Date.now() - 2 * DAY) } });
     // 1st-year style batch: different cycle number, same deadline → same period
     const other = await Cycle.create({ batch: bca._id, semester: sem._id, number: 1, startDate: day(-60), endDate: day(-3),
       track: { tracked: true, deadline: new Date(Date.now() - 2 * DAY) } });
@@ -277,6 +280,27 @@ const ymd = (d) => perf.dayYmd(d);
     r = await http('PATCH', `/api/performance/period/${per}`, { token: T(admin), body: { tracked: false } });
     const oo = await Cycle.findById(other._id);
     ok('period toggle updates every cycle due that day', r.status === 200 && r.body.updated >= 2 && oo.track.tracked === false, JSON.stringify(r.body));
+  }
+
+  console.log('\n— tracking counts only from the day it began');
+  {
+    const solo = await Batch.create({ name: 'Solo Batch', semester: sem._id, trainers: [deepu._id] });
+    const late = await http('POST', '/api/cycles', { token: T(admin), body: { batch: solo._id, number: 9, startDate: ymd(day(-6)), endDate: ymd(day(5)) } });
+    const lc = await Cycle.findById(late.body.cycle._id);
+    await DailyLog.create({ batch: solo._id, semester: sem._id, date: day(-5), notes: 'backfilled by admin', loggedBy: admin._id, firstLoggedBy: admin._id });
+    let sc = await perf.scoreCycle(lc);
+    ok('class days before tracking began are ignored', sc.items.logs.state === 'pending' && sc.items.logs.days === 0, JSON.stringify(sc.items.logs));
+    ok('plan not "missing" right after a late-created cycle (2 days to fill it)', sc.items.plan.state === 'pending', JSON.stringify(sc.items.plan));
+    sc = await perf.scoreCycle(lc, new Date(Date.now() + 3 * DAY));
+    ok('plan becomes missing once the 2 days pass', sc.items.plan.state === 'missing', JSON.stringify(sc.items.plan));
+    await Cycle.updateOne({ _id: lc._id }, { $set: { 'track.plan': { at: new Date(Date.now() + DAY), by: deepu._id, admin: false } } });
+    sc = await perf.scoreCycle(await Cycle.findById(lc._id), new Date(Date.now() + 3 * DAY));
+    ok('plan filled within the 2 days counts as on time', sc.items.plan.state === 'on-time', JSON.stringify(sc.items.plan));
+    // turning tracking on later stamps the moment
+    const off = await Cycle.create({ batch: solo._id, semester: sem._id, number: 10, startDate: day(6), endDate: day(9) });
+    await http('PATCH', `/api/performance/cycle/${off._id}`, { token: T(admin), body: { tracked: true } });
+    const on = await Cycle.findById(off._id);
+    ok('switching tracking on records trackedFrom', on.track.tracked && on.track.trackedFrom && Math.abs(on.track.trackedFrom - Date.now()) < 60000);
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

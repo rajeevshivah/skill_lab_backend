@@ -52,6 +52,7 @@ const stampSchema = new mongoose.Schema({
 // Trainer accountability (see services/performance.js)
 const trackSchema = new mongoose.Schema({
   tracked:     { type: Boolean, default: false },   // only tracked cycles are scored
+  trackedFrom: { type: Date, default: null },        // class days before this don't count; plan due ≥ this + 2 days
   projectDate: { type: Date, default: null },       // default: cycle end date
   deadline:    { type: Date, default: null },       // default: Saturday after project day, 7 PM IST
   excusedNote: { type: String, default: '' },       // admin: lateness not penalised
