@@ -30,6 +30,7 @@ app.use('/api/cycles',    require('./routes/cycles'));
 app.use('/api/marks',     require('./routes/cyclemarks'));
 app.use('/api/cycleplans', require('./routes/cycleplans'));
 app.use('/api/search',    require('./routes/search'));
+app.use('/api/performance', require('./routes/performance'));
 app.use('/api/tokens',    require('./routes/tokens'));   // MCP tokens for AI apps
 
 // ── MCP endpoint (AI apps connect here — see MCP-GUIDE.md) ────────

@@ -5,6 +5,7 @@ const Batch     = require('../models/Batch');
 const Student   = require('../models/Student');
 const DailyLog  = require('../models/DailyLog');
 const { protect, canAccessBatch } = require('../middleware/auth');
+const perf = require('../services/performance');
 const router    = express.Router();
 
 function dayKey(d) { const dt = new Date(d); dt.setHours(0,0,0,0); return dt; }
@@ -143,6 +144,11 @@ async function saveCycleMarks(user, cycleId, inputRows) {
       } };
 
     if (ops.length) await CycleMark.bulkWrite(ops);
+    // Accountability: marks count as done once every student has an entry.
+    if (ops.length && (cycle.track?.marks?.at || await perf.marksComplete(cycle))) {
+      await perf.stamp(cycle, 'marks', req.user);
+      await cycle.save();
+    }
     return { status: 200, body: { saved: ops.length } };
 }
 

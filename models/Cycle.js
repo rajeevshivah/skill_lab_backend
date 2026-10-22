@@ -41,6 +41,30 @@ const reportSchema = new mongoose.Schema({
   projectNote:        { type: String, default: '' },
 }, { _id: false });
 
+// Who first completed a piece of cycle work, and when. admin=true means it was
+// done by someone who is not a trainer of the batch (e.g. the superadmin).
+const stampSchema = new mongoose.Schema({
+  at:    { type: Date, default: null },
+  by:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  admin: { type: Boolean, default: false },
+}, { _id: false });
+
+// Trainer accountability (see services/performance.js)
+const trackSchema = new mongoose.Schema({
+  tracked:     { type: Boolean, default: false },   // only tracked cycles are scored
+  projectDate: { type: Date, default: null },       // default: cycle end date
+  deadline:    { type: Date, default: null },       // default: Saturday after project day, 7 PM IST
+  excusedNote: { type: String, default: '' },       // admin: lateness not penalised
+  report: { type: stampSchema, default: null },
+  marks:  { type: stampSchema, default: null },
+  top3:   { type: stampSchema, default: null },
+  plan:   { type: stampSchema, default: null },
+  lateEdits: [{
+    _id: false, item: String, at: Date,
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, admin: Boolean,
+  }],
+}, { _id: false });
+
 const cycleSchema = new mongoose.Schema({
   batch:     { type: mongoose.Schema.Types.ObjectId, ref: 'Batch', required: true },
   semester:  { type: mongoose.Schema.Types.ObjectId, ref: 'Semester', required: true },
@@ -54,6 +78,7 @@ const cycleSchema = new mongoose.Schema({
   // project mark out of 100 and the category comes from the project % alone.
   assessmentHeld: { type: Boolean, default: true },
   report:    { type: reportSchema, default: () => ({}) },
+  track:     { type: trackSchema, default: () => ({}) },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   closedAt:  { type: Date, default: null },
 }, { timestamps: true });

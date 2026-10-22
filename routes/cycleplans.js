@@ -3,6 +3,7 @@ const CyclePlan = require('../models/CyclePlan');
 const Cycle     = require('../models/Cycle');
 const Batch     = require('../models/Batch');
 const { protect, canAccessBatch } = require('../middleware/auth');
+const perf = require('../services/performance');
 const router    = express.Router();
 
 // GET /api/cycleplans/:cycleId  — the class-wise plan + the batch's trainers (for the picker)
@@ -60,6 +61,7 @@ async function saveCyclePlan(user, cycleId, inputClasses) {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     ).populate('classes.trainer', 'name');
 
+    if (classes.length) { await perf.stamp(cycle, 'plan', req.user); await cycle.save(); }
     return { status: 200, body: { classes: plan.classes } };
 }
 

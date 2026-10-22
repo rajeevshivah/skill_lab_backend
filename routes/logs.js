@@ -159,7 +159,8 @@ async function upsertDailyLog(user, input) {
       contributors: [...contributors],
     };
     const log = await DailyLog.findOneAndUpdate(
-      { batch, date: d }, update, { new: true, upsert: true, setDefaultsOnInsert: true }
+      { batch, date: d }, { $set: update, $setOnInsert: { firstLoggedBy: req.user._id } },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
     );
 
     // Tick off covered topics in the plan (mark done if status=done, in-progress if partial)

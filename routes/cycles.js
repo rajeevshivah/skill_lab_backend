@@ -7,6 +7,7 @@ const Topper   = require('../models/Topper');
 const Student  = require('../models/Student');
 const Semester = require('../models/Semester');
 const { protect, superadminOnly, canAccessBatch } = require('../middleware/auth');
+const perf = require('../services/performance');
 const router   = express.Router();
 
 function dayKey(d) { const dt = new Date(d); dt.setHours(0,0,0,0); return dt; }
@@ -156,7 +157,7 @@ router.post('/bulk', protect, superadminOnly, async (req, res) => {
       try {
         const c = await Cycle.create({
           batch: batchId, semester: batchDoc.semester, number: num, name: name || '',
-          startDate: s, endDate: e, createdBy: req.user._id,
+          startDate: s, endDate: e, createdBy: req.user._id, track: { tracked: true },
         });
         created.push({ batchId, name: batchDoc.name, number: num, cycleId: c._id });
       } catch (err) {
@@ -196,7 +197,7 @@ router.post('/', protect, superadminOnly, async (req, res) => {
 
     const cycle = await Cycle.create({
       batch, semester: batchDoc.semester, number: num, name: name || '',
-      startDate: s, endDate: e, createdBy: req.user._id,
+      startDate: s, endDate: e, createdBy: req.user._id, track: { tracked: true },
     });
     res.status(201).json({ cycle });
   } catch (err) {
@@ -311,6 +312,10 @@ async function saveCycleReport(user, cycleId, input) {
     cycle.report.submitted = true;
     cycle.report.submittedBy = req.user._id;
     cycle.report.submittedAt = new Date();
+    // Accountability stamps: the report form counts once any trainer field is
+    // given; Top 3 counts once a non-empty Top 3 is saved.
+    if (allowed.some(k => k in req.body)) await perf.stamp(cycle, 'report', req.user);
+    if (Array.isArray(req.body.top3) && req.body.top3.length) await perf.stamp(cycle, 'top3', req.user);
     await cycle.save();
     return { status: 200, body: { cycle } };
 }

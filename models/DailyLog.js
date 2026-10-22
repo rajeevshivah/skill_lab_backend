@@ -9,7 +9,8 @@ const dailyLogSchema = new mongoose.Schema({
   batch:    { type: mongoose.Schema.Types.ObjectId, ref: 'Batch', required: true },
   semester: { type: mongoose.Schema.Types.ObjectId, ref: 'Semester', required: true },
   date:     { type: Date, required: true },
-  loggedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  loggedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },   // last person who saved
+  firstLoggedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // who created it (never changes)
   // Topics touched today (references into the Plan's topics) + how it went
   topicsCovered: [{ type: mongoose.Schema.Types.ObjectId }], // topic _ids within the Plan
   status:   { type: String, enum: ['done', 'partial', 'not-covered'], default: 'done' },
