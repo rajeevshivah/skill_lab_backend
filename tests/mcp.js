@@ -86,7 +86,7 @@ const call = async (client, name, args = {}) => {
   await CycleMark.create({ cycle: cycle._id, batch: mern._id, semester: sem._id, student: s2._id, status: 'evaluated', assessment: 0, project: 0, category: 'zero' });
   // s3 has no mark row → not-evaluated
   await CyclePlan.create({ cycle: cycle._id, batch: mern._id, semester: sem._id,
-    classes: [{ number: 1, title: 'Intro to hooks', date: today.toISOString().slice(0, 10) }] });
+    classes: [{ number: 1, title: 'Intro to hooks', date: `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}` }] });
   await DailyLog.create({ batch: mern._id, semester: sem._id, date: today, notes: 'useState demo', attendanceTaken: true,
     attendance: [{ student: s1._id, present: true }, { student: s2._id, present: false }, { student: s3._id, present: true }] });
   await Student.updateMany({ batch: mern._id }, { 'stats.totalSessions': 1 });
@@ -123,7 +123,7 @@ const call = async (client, name, args = {}) => {
   const cL = await connect(LUCKY);
   const { tools } = await cL.listTools();
   const names = tools.map(t => t.name).sort();
-  ok('16 tools listed (11 read + 5 write)', names.length === 16, names.join(','));
+  ok('trainer sees 19 tools (11 read + 8 write)', names.length === 19, names.join(','));
   const READ = ['whoami','search','list_batches','get_batch_roster','list_cycles','get_cycle_marks','get_cycle_plan','get_daily_logs','get_student_profile','get_today_overview','get_hall_of_fame'];
   ok('all 11 read tools marked read-only', READ.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === true));
   ok('server instructions sent', /Skill Lab/.test(cL.getInstructions() || ''));

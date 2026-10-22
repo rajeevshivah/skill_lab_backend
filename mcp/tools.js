@@ -42,7 +42,15 @@ function requireId(v, what) {
 
 // Same day-boundary rule the routes use (server-local midnight).
 function dayKey(d) { const dt = new Date(d); dt.setHours(0, 0, 0, 0); return dt; }
-const ymd = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
+// Dates are stored at server-local midnight (dayKey), so format them with the
+// server's local calendar too — toISOString() would show the previous day on a
+// server running ahead of UTC (e.g. in IST).
+const pad2 = (n) => String(n).padStart(2, '0');
+const ymd = (d) => {
+  if (!d) return null;
+  const x = new Date(d);
+  return `${x.getFullYear()}-${pad2(x.getMonth() + 1)}-${pad2(x.getDate())}`;
+};
 
 // Returns null (= all batches) for superadmin, else the list of allowed ids.
 async function scope(user) { return readableBatchIds(user); }

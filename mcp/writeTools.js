@@ -98,8 +98,8 @@ function writeTool(def) {
     write: true,
     description: def.description + HOW_TO_CONFIRM,
     input: { ...def.input, ...CONFIRM_FIELDS },
-    async handler(args, user) {
-      const plan = await def.plan(args, user);
+    async handler(args, user, ctx) {
+      const plan = await def.plan(args, user, ctx);
       if (!args.confirm) {
         return {
           mode: 'preview',
@@ -507,4 +507,4 @@ writeTools.push(writeTool({
   },
 }));
 
-module.exports = { writeTools };
+module.exports = { writeTools, writeTool, unwrap, resolveStudents, studentRef, todayIST };

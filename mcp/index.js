@@ -20,7 +20,27 @@ const { mcpAuth }   = require('../middleware/mcpAuth');
 const McpAuditLog   = require('../models/McpAuditLog');
 const { tools: readTools, ToolError } = require('./tools');
 const { writeTools } = require('./writeTools');
-const tools = [...readTools, ...writeTools];
+const { adminTools } = require('./adminTools');
+const jwt = require('jsonwebtoken');
+const tools = [...readTools, ...writeTools, ...adminTools];
+
+// Lets a tool call an EXISTING website route inside this server, as the
+// current user — so admin tools reuse every website rule unchanged.
+// A 2-minute login token is minted for the call and never leaves the server.
+function makeApi(req) {
+  const base  = `http://127.0.0.1:${req.socket.localPort}`;
+  const token = jwt.sign({ id: req.user._id }, process.env.JWT_SECRET, { expiresIn: '2m' });
+  return async (method, path, body) => {
+    const r = await fetch(base + path, {
+      method,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    let json = {};
+    try { json = await r.json(); } catch {}
+    return { status: r.status, body: json };
+  };
+}
 const pkg = require('../package.json');
 
 const router = express.Router();
@@ -35,7 +55,10 @@ const INSTRUCTIONS =
   'WRITE tools (fill_cycle_report, update_cycle_marks, set_cycle_top3, save_daily_log, save_cycle_plan_class) never save on ' +
   'the first call: they return a preview. Always show that preview to the user in plain words and wait for an explicit "yes" ' +
   'before calling again with confirm=true and the preview_token. If the user changes anything, make a new preview. ' +
-  'There are no delete tools.';
+  'There are no delete tools. To "remove" something use the reversible tools: update_user active=false (deactivate a login), ' +
+  'update_batch remove_trainers / active=false, update_semester status=archived. ' +
+  'Admin tools (users, semesters, batches, cycles, moving students) appear only for superadmin. ' +
+  'When create_user or update_user returns a temporaryPassword, show it to the user once and remind them to share it privately.';
 
 // Wraps a handler: runs it, writes an audit row, converts the result into
 // the MCP response shape, and turns errors into readable tool errors.
@@ -45,7 +68,8 @@ function wrap(tool, req) {
     let ok = true, errorMsg = '';
     let kind = tool.write ? 'preview' : 'read';
     try {
-      const data = await tool.handler(args || {}, req.user);
+      if (tool.admin && req.user.role !== 'superadmin') throw new ToolError('Superadmin only.');
+      const data = await tool.handler(args || {}, req.user, { api: req.mcpApi });
       if (tool.write && data?.mode === 'saved') kind = 'write';
       return {
         content: [{ type: 'text', text: JSON.stringify(data, null, 1) }],
@@ -75,7 +99,9 @@ function buildServer(req) {
     { name: 'skilllab-sheat', title: 'SHEAT Skill Lab', version: pkg.version },
     { instructions: INSTRUCTIONS }
   );
-  for (const tool of tools) {
+  req.mcpApi = makeApi(req);
+  // Trainers never even see admin tools.
+  for (const tool of tools.filter(t => !t.admin || req.user.role === 'superadmin')) {
     server.registerTool(tool.name, {
       title: tool.title,
       description: tool.description,
