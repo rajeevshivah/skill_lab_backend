@@ -408,6 +408,167 @@ admin(writeTool({
   },
 }));
 
+// ── Bulk back-filling (admin) ────────────────────────────────────────
+const { upsertDailyLog } = require('../routes/logs').__shared;
+const { saveCyclePlan }  = require('../routes/cycleplans').__shared;
+const CyclePlanModel = require('../models/CyclePlan');
+const DailyLogModel  = require('../models/DailyLog');
+const todayIST = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+
+admin(writeTool({
+  name: 'save_cycle_plan_bulk',
+  title: 'Add many classes to a cycle plan',
+  description:
+    'Superadmin only. Add or update several classes of ONE cycle\'s class-by-class plan in one go (matched by class number; ' +
+    'classes not listed are kept). Use for back-filling a whole cycle. For one class use save_cycle_plan_class.',
+  input: {
+    cycle_id: z.string(),
+    classes: z.array(z.object({
+      number: z.number().int().min(1).max(200),
+      title: z.string().min(1).max(200),
+      notes: z.string().max(2000).optional(),
+      date: isoDate.optional(),
+      time: z.string().max(20).optional(),
+    })).min(1).max(60),
+  },
+  async plan(args, me) {
+    requireId(args.cycle_id, 'cycle');
+    const c = await Cycle.findById(args.cycle_id).populate('batch', 'name');
+    if (!c) throw new ToolError('Cycle not found.');
+    const nums = args.classes.map(x => x.number);
+    if (new Set(nums).size !== nums.length) throw new ToolError('Each class number may appear only once.');
+    const existing = await CyclePlanModel.findOne({ cycle: c._id }).lean();
+    const byNum = new Map((existing?.classes || []).map(k => [k.number, k]));
+    const changes = args.classes.map(x => ({ number: x.number, date: x.date || '', title: x.title, action: byNum.has(x.number) ? 'update' : 'add' }));
+    return {
+      summary: `Cycle ${c.number} plan — ${c.batch.name}: ${changes.filter(x => x.action === 'add').length} new, ${changes.filter(x => x.action === 'update').length} updated`,
+      changes,
+      apply: async () => {
+        const merged = new Map((existing?.classes || []).map(k => [k.number, {
+          number: k.number, title: k.title, notes: k.notes, trainer: k.trainer || null, date: k.date || '', time: k.time || '' }]));
+        for (const x of args.classes) {
+          const old = merged.get(x.number) || { trainer: null, time: '', notes: '', date: '' };
+          merged.set(x.number, { ...old, number: x.number, title: x.title,
+            notes: x.notes ?? old.notes, date: x.date ?? old.date, time: x.time ?? old.time });
+        }
+        const list = [...merged.values()].sort((a, b) => a.number - b.number);
+        const r = await saveCyclePlan(me, c._id, list);
+        if (r.status !== 200) throw new ToolError(r.body?.message || 'Could not save the plan.');
+        return { totalClasses: r.body.classes.length };
+      },
+    };
+  },
+}));
+
+admin(writeTool({
+  name: 'save_daily_logs_bulk',
+  title: 'Add many class logs to a batch',
+  description:
+    'Superadmin only. Create daily class logs (what was taught + status) for many dates of ONE batch in one go — for back-filling ' +
+    'classes that were taught but never logged. No attendance is recorded. Dates that already have a log are SKIPPED (never ' +
+    'overwritten) unless overwrite=true, which replaces only the notes and status (attendance is always kept). Future dates are refused.',
+  input: {
+    batch_id: z.string(),
+    logs: z.array(z.object({
+      date: isoDate,
+      notes: z.string().min(1).max(3000),
+      status: z.enum(['done', 'partial', 'not-covered']).optional(),
+    })).min(1).max(80),
+    overwrite: z.boolean().optional(),
+  },
+  async plan(args, me) {
+    requireId(args.batch_id, 'batch');
+    const b = await Batch.findById(args.batch_id).select('name');
+    if (!b) throw new ToolError('Batch not found.');
+    const dates = args.logs.map(l => l.date);
+    if (new Set(dates).size !== dates.length) throw new ToolError('Each date may appear only once.');
+    const future = dates.filter(d => d > todayIST());
+    if (future.length) throw new ToolError(`Future dates are not allowed: ${future.join(', ')}`);
+    const have = await DailyLogModel.find({ batch: b._id, date: { $in: dates.map(dayKey) } }).select('date notes topicsCovered prepLink').lean();
+    const haveSet = new Map(have.map(h => [ymd(h.date), h]));
+    const changes = args.logs.map(l => ({
+      date: l.date, notes: l.notes.slice(0, 80) + (l.notes.length > 80 ? '…' : ''),
+      action: haveSet.has(l.date) ? (args.overwrite ? 'overwrite notes' : 'skip (already logged)') : 'add',
+    }));
+    const todo = args.logs.filter(l => !haveSet.has(l.date) || args.overwrite);
+    if (!todo.length) throw new ToolError('Every date already has a log. Nothing to add.');
+    return {
+      summary: `${b.name}: ${todo.length} class log(s) to save, ${args.logs.length - todo.length} skipped`,
+      changes,
+      apply: async () => {
+        let saved = 0;
+        for (const l of todo) {
+          const old = haveSet.get(l.date);
+          // an overwrite keeps the topics + prep link already on that day
+          const r = await upsertDailyLog(me, { batch: b._id, date: l.date, notes: l.notes, status: l.status || 'done',
+            ...(old ? { topicsCovered: old.topicsCovered, prepLink: old.prepLink } : {}) });
+          if (r.status !== 200 && r.status !== 201) throw new ToolError(`${l.date}: ${r.body?.message || 'could not save'} (saved ${saved} before this)`);
+          saved++;
+        }
+        return { logsSaved: saved };
+      },
+    };
+  },
+}));
+
+admin(writeTool({
+  name: 'set_cycle_accountability',
+  title: 'Set deadline / on-time record for a cycle',
+  description:
+    'Superadmin only. Trainer Performance settings for one batch\'s cycle: turn tracking on/off, set the project day and the deadline ' +
+    '(India time; empty = default Saturday after the project day, 7 PM), excuse a batch with a visible reason, and record WHEN each ' +
+    'piece of cycle work was completed and BY WHOM — report (cycle form), marks, top3, plan. Use completions for cycles finished ' +
+    'before tracking existed. done_by "trainer" credits the batch trainer (give trainer_name if the batch has several); ' +
+    '"admin" means an admin did it and the trainer gets no credit. completed_at "" clears that record.',
+  input: {
+    cycle_id: z.string(),
+    tracked: z.boolean().optional(),
+    project_date: isoDate.optional(),
+    deadline: z.string().regex(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})?$/).optional().describe('YYYY-MM-DDTHH:mm India time, or "" for the default'),
+    excuse_note: z.string().max(300).optional().describe('"" removes the excuse'),
+    completions: z.array(z.object({
+      item: z.enum(['report', 'marks', 'top3', 'plan']),
+      completed_at: z.string().regex(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})?$/).describe('YYYY-MM-DDTHH:mm India time, or "" to clear'),
+      done_by: z.enum(['trainer', 'admin']).optional(),
+      trainer_name: z.string().optional(),
+    })).max(4).optional(),
+  },
+  async plan(args, me, ctx) {
+    requireId(args.cycle_id, 'cycle');
+    const c = await Cycle.findById(args.cycle_id)
+      .populate({ path: 'batch', select: 'name trainers', populate: { path: 'trainers', select: 'name isActive role' } });
+    if (!c) throw new ToolError('Cycle not found.');
+    const body = {}, changes = [];
+    const fmt = (d) => d ? new Date(new Date(d).getTime() + 330 * 60000).toISOString().slice(0, 16).replace('T', ' ') + ' IST' : 'default';
+    if (args.tracked !== undefined) { body.tracked = args.tracked; changes.push({ field: 'tracked', from: !!c.track?.tracked, to: args.tracked }); }
+    if (args.project_date !== undefined) { body.projectDate = args.project_date; changes.push({ field: 'project_date', from: c.track?.projectDate ? ymd(c.track.projectDate) : `default (${ymd(c.endDate)})`, to: args.project_date }); }
+    if (args.deadline !== undefined) { body.deadline = args.deadline; changes.push({ field: 'deadline', from: fmt(c.track?.deadline), to: args.deadline ? args.deadline.replace('T', ' ') + ' IST' : 'default (Saturday after project day, 7 PM)' }); }
+    if (args.excuse_note !== undefined) { body.excusedNote = args.excuse_note; changes.push({ field: 'excuse', from: c.track?.excusedNote || '', to: args.excuse_note }); }
+    if (args.completions?.length) {
+      body.stamps = {};
+      const trainers = (c.batch?.trainers || []).filter(t => t.isActive !== false && !/\(review\)/i.test(t.name));
+      for (const x of args.completions) {
+        if (!x.completed_at) { body.stamps[x.item] = null; changes.push({ field: x.item, from: c.track?.[x.item]?.at ? fmt(c.track[x.item].at) : 'none', to: 'cleared' }); continue; }
+        let by, admin = x.done_by === 'admin';
+        if (admin) by = me._id;
+        else {
+          const pick = x.trainer_name ? trainers.find(t => rx(x.trainer_name).test(t.name)) : (trainers.length === 1 ? trainers[0] : null);
+          if (!pick) throw new ToolError(`${c.batch.name} has ${trainers.length} trainer(s) (${trainers.map(t => t.name).join(', ') || 'none'}). Say which one with trainer_name.`);
+          by = pick._id;
+        }
+        body.stamps[x.item] = { at: x.completed_at, by, admin };
+        const who = admin ? `admin (${me.name})` : trainers.find(t => String(t._id) === String(by)).name;
+        changes.push({ field: x.item, from: c.track?.[x.item]?.at ? fmt(c.track[x.item].at) : 'none', to: `${x.completed_at.replace('T', ' ')} IST by ${who}` });
+      }
+    }
+    if (!changes.length) throw new ToolError('Nothing to change.');
+    return {
+      summary: `Trainer Performance settings — Cycle ${c.number}, ${c.batch?.name}`, changes,
+      apply: async () => { const out = unwrap(await ctx.api('PATCH', `/api/performance/cycle/${c._id}`, body)); return { deadline: fmt(out.deadline) }; },
+    };
+  },
+}));
+
 admin(writeTool({
   name: 'set_cycle_status',
   title: 'Open the report / close a cycle',

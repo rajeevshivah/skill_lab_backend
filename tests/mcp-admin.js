@@ -13,6 +13,7 @@ const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/cli
 
 const User = require('../models/User'), Semester = require('../models/Semester'), Batch = require('../models/Batch');
 const Student = require('../models/Student'), Cycle = require('../models/Cycle'), Plan = require('../models/Plan');
+const CyclePlan = require('../models/CyclePlan'), DailyLog = require('../models/DailyLog');
 
 let pass = 0, fail = 0;
 const ok = (n, c, x = '') => { if (c) { pass++; console.log('  PASS', n); } else { fail++; console.log('  FAIL', n, x); } };
@@ -46,7 +47,7 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
 
   const app = express(); app.use(express.json({ limit: '10mb' }));
   for (const [p, r] of [['auth', 'auth'], ['semesters', 'semesters'], ['batches', 'batches'], ['students', 'students'], ['plans', 'plans'],
-    ['logs', 'logs'], ['cycles', 'cycles'], ['marks', 'cyclemarks'], ['cycleplans', 'cycleplans'], ['tokens', 'tokens']])
+    ['logs', 'logs'], ['cycles', 'cycles'], ['marks', 'cyclemarks'], ['cycleplans', 'cycleplans'], ['tokens', 'tokens'], ['performance', 'performance']])
     app.use(`/api/${p}`, require(`../routes/${r}`));
   app.use('/mcp', require('../mcp'));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
@@ -72,7 +73,7 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   console.log('\n1. Who sees which tools');
   const aNames = (await cA.listTools()).tools.map(t => t.name);
   const tNames = (await cT.listTools()).tools.map(t => t.name);
-  ok('superadmin sees 33 tools', aNames.length === 33, aNames.length);
+  ok('superadmin sees 36 tools', aNames.length === 36, aNames.length);
   ok('trainer sees 21 tools (no admin ones)', tNames.length === 21, tNames.length);
   ok('trainer does NOT see create_user / update_batch / create_cycles', !['create_user', 'update_batch', 'create_cycles', 'list_users'].some(n => tNames.includes(n)));
   ok('trainer sees add_students / edit_student / set_batch_plan', ['add_students', 'edit_student', 'set_batch_plan'].every(n => tNames.includes(n)));
@@ -156,6 +157,40 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   ok('new semester active, old archived', (await Semester.findOne({ status: 'active' })).name === 'Even sem 2026-2027' && (await Semester.findById(sem._id)).status === 'archived');
   ok('reactivate old semester', (await yes(cA, 'update_semester', { semester: 'Odd sem', status: 'active' })).saved.data?.semester?.status === 'active');
   ok('only one active', (await Semester.countDocuments({ status: 'active' })) === 1);
+
+  console.log('\n— bulk back-filling + accountability (admin)');
+  {
+    const daCycle = await Cycle.findOne({ batch: da._id, number: 1 });
+    const pb = await yes(cA, 'save_cycle_plan_bulk', { cycle_id: String(daCycle._id), classes: [
+      { number: 1, title: 'Intro', date: '2026-10-01' }, { number: 2, title: 'Pandas', date: '2026-10-02', notes: 'dataframes' }] });
+    ok('bulk plan: preview lists 2 new', pb.preview.data?.changes?.filter(x => x.action === 'add').length === 2, pb.preview.text);
+    ok('bulk plan saved', pb.saved.data?.totalClasses === 2, pb.saved.text);
+    const pb2 = await yes(cA, 'save_cycle_plan_bulk', { cycle_id: String(daCycle._id), classes: [{ number: 2, title: 'Pandas basics' }, { number: 3, title: 'Charts' }] });
+    const cpDoc = await CyclePlan.findOne({ cycle: daCycle._id }).lean();
+    ok('bulk plan merges by number (keeps class 1, updates 2, keeps its date)', pb2.saved.data?.totalClasses === 3
+      && cpDoc.classes.find(k => k.number === 2).title === 'Pandas basics' && cpDoc.classes.find(k => k.number === 2).date === '2026-10-02');
+    ok('bulk plan refused for trainer', (await call(cT, 'save_cycle_plan_bulk', { cycle_id: String(daCycle._id), classes: [{ number: 9, title: 'x' }] })).isError);
+
+    await DailyLog.create({ batch: mern._id, semester: sem._id, date: new Date('2026-10-05T00:00:00'), notes: 'trainer wrote this', loggedBy: saif._id,
+      attendance: [{ student: s1._id, present: true }], attendanceTaken: true });
+    const lb = await yes(cA, 'save_daily_logs_bulk', { batch_id: String(mern._id), logs: [
+      { date: '2026-10-05', notes: 'should be skipped' }, { date: '2026-10-06', notes: 'OOP basics' }, { date: '2026-10-07', notes: 'Inheritance' }] });
+    ok('bulk logs: existing date skipped in preview', lb.preview.data?.changes?.[0]?.action?.startsWith('skip'), JSON.stringify(lb.preview.data?.changes?.[0]));
+    ok('bulk logs: 2 saved', lb.saved.data?.logsSaved === 2, lb.saved.text);
+    const kept = await DailyLog.findOne({ batch: mern._id, date: new Date('2026-10-05T00:00:00') });
+    ok('existing trainer log untouched', kept.notes === 'trainer wrote this' && kept.attendance.length === 1);
+    ok('future date refused', /future/i.test((await call(cA, 'save_daily_logs_bulk', { batch_id: String(mern._id), logs: [{ date: '2099-01-01', notes: 'x' }] })).text));
+    const ow = await yes(cA, 'save_daily_logs_bulk', { batch_id: String(mern._id), overwrite: true, logs: [{ date: '2026-10-05', notes: 'rewritten' }] });
+    const kept2 = await DailyLog.findOne({ batch: mern._id, date: new Date('2026-10-05T00:00:00') });
+    ok('overwrite replaces notes but keeps attendance', ow.saved.data?.logsSaved === 1 && kept2.notes === 'rewritten' && kept2.attendance.length === 1 && kept2.attendanceTaken);
+
+    const acc = await yes(cA, 'set_cycle_accountability', { cycle_id: String(daCycle._id), project_date: '2026-10-14', deadline: '2026-10-17T21:00',
+      completions: [{ item: 'report', completed_at: '2026-10-18T21:00', done_by: 'admin' }] });
+    const dc = await Cycle.findById(daCycle._id);
+    ok('accountability: deadline + admin stamp saved', acc.saved.data?.deadline === '2026-10-17 21:00 IST' && dc.track.report.admin === true, acc.saved.text);
+    const noTr = await call(cA, 'set_cycle_accountability', { cycle_id: String(daCycle._id), completions: [{ item: 'marks', completed_at: '2026-10-17T10:00', done_by: 'trainer' }] });
+    ok('trainer credit needs a trainer on the batch', noTr.isError && /trainer/.test(noTr.text), noTr.text);
+  }
 
   console.log(`\n${pass} passed, ${fail} failed`);
   await cA.close(); await cT.close();

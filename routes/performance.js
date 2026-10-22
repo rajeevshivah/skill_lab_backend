@@ -35,7 +35,7 @@ async function buildDashboard(semester, number) {
       || [...rounds].reverse().find(r => r.tracked) || rounds[rounds.length - 1]).number;
 
   const cycles = await Cycle.find({ semester: semester._id, number: pick })
-    .populate({ path: 'batch', select: 'name track trainers', populate: { path: 'trainers', select: 'name role' } })
+    .populate({ path: 'batch', select: 'name track trainers', populate: { path: 'trainers', select: 'name role isActive' } })
     .populate('track.report.by track.marks.by track.top3.by track.plan.by', 'name');
 
   const rows = [];
@@ -45,7 +45,7 @@ async function buildDashboard(semester, number) {
     rows.push({
       cycleId: c._id, number: c.number, status: undefined,
       batch: c.batch?.name || '', batchId: c.batch?._id, track: c.batch?.track || '',
-      trainers: (c.batch?.trainers || []).filter(t => !isReviewer(t)).map(t => ({ id: t._id, name: t.name })),
+      trainers: (c.batch?.trainers || []).filter(t => !isReviewer(t) && t.isActive !== false).map(t => ({ id: t._id, name: t.name })),
       start: perf.dayYmd(c.startDate), end: perf.dayYmd(c.endDate),
       projectDate: perf.dayYmd(s.projectDate), deadline: s.deadline,
       tracked: s.tracked, excusedNote: s.excusedNote,
@@ -59,13 +59,13 @@ async function buildDashboard(semester, number) {
 
   // Trainer scores: this round + average of every tracked round this semester
   const tracked = await Cycle.find({ semester: semester._id, 'track.tracked': true })
-    .populate({ path: 'batch', select: 'name trainers', populate: { path: 'trainers', select: 'name' } });
+    .populate({ path: 'batch', select: 'name trainers', populate: { path: 'trainers', select: 'name isActive' } });
   const per = new Map();   // trainerId → { name, scores: [{number, score}] }
   for (const c of tracked) {
     const s = c.number === pick ? rows.find(r => String(r.cycleId) === String(c._id)) : await perf.scoreCycle(c);
     if (s?.score == null) continue;
     for (const t of c.batch?.trainers || []) {
-      if (isReviewer(t)) continue;
+      if (isReviewer(t) || t.isActive === false) continue;
       const e = per.get(String(t._id)) || { id: t._id, name: t.name, scores: [] };
       e.scores.push({ number: c.number, batch: c.batch.name, score: s.score });
       per.set(String(t._id), e);
@@ -110,6 +110,18 @@ router.patch('/cycle/:id', protect, superadminOnly, async (req, res) => {
     }
     if ('excusedNote' in b) c.track.excusedNote = String(b.excusedNote || '').slice(0, 300);
     if ('tracked' in b) c.track.tracked = !!b.tracked;
+    // Record when an item was completed and by whom (for cycles finished
+    // before tracking existed). { report: { at:'YYYY-MM-DDTHH:mm' (IST), by:userId, admin:bool } | null }
+    if (b.stamps && typeof b.stamps === 'object') {
+      for (const item of ['report', 'marks', 'top3', 'plan']) {
+        if (!(item in b.stamps)) continue;
+        const st = b.stamps[item];
+        if (st === null) { c.track[item] = null; continue; }
+        const at = perf.istToDate(st.at);
+        if (!at) return res.status(400).json({ message: `${item}: time must look like 2026-10-17T21:00` });
+        c.track[item] = { at, by: st.by || null, admin: !!st.admin };
+      }
+    }
     c.markModified('track');
     await c.save();
     res.json({ ok: true, deadline: perf.deadlineOf(c) });

@@ -177,6 +177,24 @@ const ymd = (d) => perf.dayYmd(d);
     && new Date(r.body.deadline).toISOString() === '2026-10-17T13:30:00.000Z', JSON.stringify(r.body));
   r = await http('PATCH', `/api/performance/cycle/${c4._id}`, { token: T(admin), body: { deadline: 'nonsense' } });
   ok('bad deadline rejected', r.status === 400);
+  // backfilling who/when for a past cycle
+  r = await http('PATCH', `/api/performance/cycle/${old._id}`, { token: T(admin), body: {
+    tracked: true, projectDate: '2026-10-15', deadline: '2026-10-17T21:00',
+    stamps: { report: { at: '2026-10-20T18:00', by: String(samant._id), admin: false }, marks: { at: '2026-10-19T10:00', by: String(admin._id), admin: true },
+      top3: { at: '2026-10-17T20:00', by: String(samant._id), admin: false } } } });
+  let o = await Cycle.findById(old._id); const so = await perf.scoreCycle(o);
+  ok('backfilled report is late by ~3 days', r.status === 200 && so.items.report.state === 'late' && Math.round(so.items.report.lateDays) === 3, JSON.stringify(so.items.report));
+  ok('backfilled marks show done by admin', so.items.marks.state === 'admin');
+  ok('backfilled Top 3 on time (before 9 PM deadline)', so.items.top3.state === 'on-time');
+  r = await http('PATCH', `/api/performance/cycle/${old._id}`, { token: T(admin), body: { stamps: { top3: null } } });
+  o = await Cycle.findById(old._id);
+  ok('a backfilled record can be cleared', !o.track.top3?.at);
+  r = await http('PATCH', `/api/performance/cycle/${old._id}`, { token: T(admin), body: { stamps: { report: { at: 'yesterday' } } } });
+  ok('bad backfill time rejected', r.status === 400);
+  await User.updateOne({ _id: deepu._id }, { isActive: false });
+  const di = await http('GET', '/api/performance?number=4', { token: T(admin) });
+  ok('inactive trainer left out of scores and batch rows', !di.body.trainers.some(t => t.name === 'Deepu') && !di.body.rows.some(x => x.trainers.some(t => t.name === 'Deepu')));
+  await User.updateOne({ _id: deepu._id }, { isActive: true });
   r = await http('PATCH', '/api/performance/round/3', { token: T(admin), body: { tracked: true } });
   const o3 = await Cycle.findById(old._id);
   ok('round toggle tracks every cycle of that number', r.status === 200 && o3.track.tracked === true);
