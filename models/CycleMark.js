@@ -33,10 +33,17 @@ cycleMarkSchema.virtual('total').get(function () {
 
 cycleMarkSchema.set('toJSON', { virtuals: true });
 
+// Score for one student in one cycle. With an assessment: project + assessment
+// out of 200. Without (assessment not held that cycle): project out of 100.
+cycleMarkSchema.statics.scoreOf = function (assessment, project, assessmentHeld = true) {
+  const total = assessmentHeld ? (assessment || 0) + (project || 0) : (project || 0);
+  return { total, outOf: assessmentHeld ? 200 : 100 };
+};
+
 // Category from total percentage: Excellent >=75, Moderate 50-74, Basic 1-49, Zero = 0
-cycleMarkSchema.statics.categoryFromMarks = function (assessment, project) {
-  const total = (assessment || 0) + (project || 0);
-  const pct = (total / 200) * 100;
+cycleMarkSchema.statics.categoryFromMarks = function (assessment, project, assessmentHeld = true) {
+  const { total, outOf } = this.scoreOf(assessment, project, assessmentHeld);
+  const pct = (total / outOf) * 100;
   if (pct === 0) return 'zero';
   if (pct >= 75) return 'excellent';
   if (pct >= 50) return 'moderate';

@@ -50,6 +50,9 @@ const cycleSchema = new mongoose.Schema({
   endDate:   { type: Date, required: true },
   // active = teaching; report-open = trainers can fill; closed = frozen
   status:    { type: String, enum: ['active', 'report-open', 'closed'], default: 'active' },
+  // The MCQ assessment is optional. When false, a student's cycle score is the
+  // project mark out of 100 and the category comes from the project % alone.
+  assessmentHeld: { type: Boolean, default: true },
   report:    { type: reportSchema, default: () => ({}) },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   closedAt:  { type: Date, default: null },

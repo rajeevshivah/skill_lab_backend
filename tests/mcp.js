@@ -123,7 +123,7 @@ const call = async (client, name, args = {}) => {
   const cL = await connect(LUCKY);
   const { tools } = await cL.listTools();
   const names = tools.map(t => t.name).sort();
-  ok('trainer sees 19 tools (11 read + 8 write)', names.length === 19, names.join(','));
+  ok('trainer sees 20 tools (11 read + 9 write)', names.length === 20, names.join(','));
   const READ = ['whoami','search','list_batches','get_batch_roster','list_cycles','get_cycle_marks','get_cycle_plan','get_daily_logs','get_student_profile','get_today_overview','get_hall_of_fame'];
   ok('all 11 read tools marked read-only', READ.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === true));
   ok('server instructions sent', /Skill Lab/.test(cL.getInstructions() || ''));
@@ -153,7 +153,7 @@ const call = async (client, name, args = {}) => {
   const st = Object.fromEntries(marks.data.rows.map(r => [r.roll, r.state]));
   ok('Aman evaluated, Bhavna zero, Chetan not-evaluated', st['101'] === 'evaluated' && st['102'] === 'zero' && st['103'] === 'not-evaluated');
   ok('not-evaluated has total null (not 0)', marks.data.rows.find(r => r.roll === '103').total === null);
-  ok('average excludes not-evaluated: (155+0)/2 = 77.5', marks.data.summary.averageTotalOf200 === 77.5);
+  ok('average excludes not-evaluated: (155+0)/2 = 77.5', marks.data.summary.averageScore === 77.5 && marks.data.summary.outOf === 200);
   ok('suggested top3 excludes zero', marks.data.summary.suggestedTop3.length === 1 && marks.data.summary.suggestedTop3[0].roll === '101');
   ok('cycle attendance uses batch sessions', marks.data.rows.find(r => r.roll === '102').attendancePct === 0 && marks.data.summary.sessionsInCycle === 1);
   const zeroOnly = await call(cL, 'get_cycle_marks', { cycle_id: String(cycle._id), state: 'zero' });

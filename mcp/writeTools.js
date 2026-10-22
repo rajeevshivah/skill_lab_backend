@@ -23,7 +23,7 @@ const User      = require('../models/User');
 
 const { canAccessBatch } = require('../middleware/auth');
 const { saveCycleReport }  = require('../routes/cycles').__shared;
-const { saveCycleMarks }   = require('../routes/cyclemarks').__shared;
+const { saveCycleMarks, setAssessmentHeld } = require('../routes/cyclemarks').__shared;
 const { upsertDailyLog }   = require('../routes/logs').__shared;
 const { saveCyclePlan }    = require('../routes/cycleplans').__shared;
 const { ToolError, helpers } = require('./tools');
@@ -206,7 +206,8 @@ writeTools.push(writeTool({
   title: 'Update cycle marks',
   description:
     'Enter or change marks for specific students in one cycle (only the students you list are touched). ' +
-    'For each: state "evaluated" with assessment (0–100) and project (0–100), or state "not-evaluated" (absent on ' +
+    'For each: state "evaluated" with project (0–100) and — only if the cycle\'s assessment was held — assessment (0–100); ' +
+    'or state "not-evaluated" (absent on ' +
     'evaluation day / joined late — no marks). Give 0 and 0 for a student who was evaluated and scored nothing. ' +
     'Category is calculated automatically unless you pass category_override. If a student had a manual category ' +
     'override and you don\'t pass one, it goes back to the automatic category (the preview shows this). ' + MARKS_RULES,
@@ -224,12 +225,17 @@ writeTools.push(writeTool({
   async plan(args, user) {
     const cycle = await loadCycleChecked(user, args.cycle_id);
     await assertCanWrite(user, cycle.batch._id);
+    const held = cycle.assessmentHeld !== false;
 
     const { found, problems } = await resolveStudents(cycle.batch._id, args.rows);
     args.rows.forEach((r, i) => {
       const who = r.roll || r.student_id || `row ${i + 1}`;
-      if (r.state === 'evaluated' && (r.assessment === undefined || r.project === undefined))
-        problems.push(`${who}: evaluated needs both assessment and project (use 0 if they scored nothing)`);
+      if (r.state === 'evaluated' && r.project === undefined)
+        problems.push(`${who}: evaluated needs a project mark (use 0 if they scored nothing)`);
+      if (r.state === 'evaluated' && held && r.assessment === undefined)
+        problems.push(`${who}: this cycle has an assessment, so give the assessment mark too (or set assessment_held=false with update_cycle if no assessment was taken)`);
+      if (r.state === 'evaluated' && !held && r.assessment !== undefined)
+        problems.push(`${who}: no assessment was held this cycle — leave assessment out`);
       if (r.state === 'not-evaluated' && (r.assessment !== undefined || r.project !== undefined || r.category_override))
         problems.push(`${who}: not-evaluated cannot have marks or a category`);
     });
@@ -245,28 +251,59 @@ writeTools.push(writeTool({
       const s = found[i];
       const old = ex[s._id.toString()];
       const evaluated = r.state === 'evaluated';
-      const category = !evaluated ? '' : (r.category_override || CycleMark.categoryFromMarks(r.assessment, r.project));
+      const category = !evaluated ? '' : (r.category_override || CycleMark.categoryFromMarks(r.assessment, r.project, held));
+      const score = (a, p) => CycleMark.scoreOf(a, p, held).total;
       const remark = r.remark !== undefined ? r.remark : (old?.remark || '');
       rows.push({
         student: s._id, name: s.name, roll: s.roll,
-        status: r.state, assessment: evaluated ? r.assessment : null, project: evaluated ? r.project : null,
+        status: r.state, assessment: evaluated && held ? r.assessment : null, project: evaluated ? r.project : null,
         category, categoryOverridden: !!r.category_override, remark,
       });
       const oldEval = old && old.status === 'evaluated';
       changes.push({
         roll: s.roll, name: s.name,
-        from: oldEval ? { assessment: old.assessment, project: old.project, total: (old.assessment || 0) + (old.project || 0), category: old.category }
+        from: oldEval ? { assessment: old.assessment, project: old.project, total: score(old.assessment, old.project), outOf: held ? 200 : 100, category: old.category }
                       : (old ? 'not-evaluated' : 'no entry yet'),
-        to: evaluated ? { assessment: r.assessment, project: r.project, total: r.assessment + r.project, category } : 'not-evaluated',
+        to: evaluated ? { ...(held ? { assessment: r.assessment } : {}), project: r.project, total: score(r.assessment, r.project), outOf: held ? 200 : 100, category } : 'not-evaluated',
         ...(old?.categoryOverridden && !r.category_override && evaluated ? { note: 'manual category override removed' } : {}),
         ...(r.remark !== undefined ? { remark } : {}),
       });
     });
     return {
-      summary: `Cycle ${cycle.number} marks — ${cycle.batch.name}: ${rows.length} student(s)`,
+      summary: `Cycle ${cycle.number} marks — ${cycle.batch.name}: ${rows.length} student(s)${held ? '' : ' (no assessment this cycle: score = project /100)'}`,
       changes,
       warnings: cycle.status === 'closed' ? ['This cycle is closed; marks can still be changed (same as the website), but its frozen report will not update.'] : [],
       apply: async () => ({ studentsSaved: unwrap(await saveCycleMarks(user, cycle._id, rows)).saved }),
+    };
+  },
+}));
+
+// ── 2b. set_assessment_held ──────────────────────────────────────────
+
+writeTools.push(writeTool({
+  name: 'set_assessment_held',
+  title: 'Was the assessment held this cycle?',
+  description:
+    'The MCQ assessment is optional per cycle. Set held=false when no assessment was taken in a cycle: scores then become ' +
+    'the project mark out of 100 and every automatic category in the cycle is recalculated (manual overrides stay). ' +
+    'held=true goes back to project + assessment out of 200. Batch trainers and superadmin.',
+  input: { cycle_id: z.string(), held: z.boolean() },
+  async plan(args, user) {
+    const cycle = await loadCycleChecked(user, args.cycle_id);
+    await assertCanWrite(user, cycle.batch._id);
+    const cur = cycle.assessmentHeld !== false;
+    if (cur === args.held) throw new ToolError(`Cycle ${cycle.number} is already set to assessment ${cur ? 'held' : 'not held'}.`);
+    const affected = await CycleMark.find({ cycle: cycle._id, status: 'evaluated', categoryOverridden: { $ne: true } });
+    const changed = affected.map(m => ({ m, to: CycleMark.categoryFromMarks(m.assessment, m.project, args.held) }))
+      .filter(x => x.to !== x.m.category);
+    const warnings = [];
+    if (!args.held && affected.some(m => m.assessment != null))
+      warnings.push('Some students already have an assessment mark in this cycle; it will be ignored in their score while the assessment is set to not held.');
+    return {
+      summary: `Cycle ${cycle.number} — ${cycle.batch.name}: assessment ${args.held ? 'HELD (score /200)' : 'NOT held (score = project /100)'}`,
+      changes: { assessmentHeld: { from: cur, to: args.held }, categoriesThatChange: changed.length },
+      warnings,
+      apply: async () => unwrap(await setAssessmentHeld(user, cycle._id, args.held)),
     };
   },
 }));

@@ -45,6 +45,7 @@ router.get('/:cycleId', protect, async (req, res) => {
     marks.forEach(m => { markByStudent[m.student.toString()] = m; });
 
     const attendance = await studentAttendance(cycle.batch._id, cycle.startDate, cycle.endDate);
+    const held = cycle.assessmentHeld !== false;
 
     const rows = students.map(s => {
       const m = markByStudent[s._id.toString()];
@@ -54,7 +55,7 @@ router.get('/:cycleId', protect, async (req, res) => {
         status: m ? m.status : 'not-evaluated',
         assessment: m ? m.assessment : null,
         project: m ? m.project : null,
-        total: m ? m.total : null,
+        total: m && m.status === 'evaluated' ? CycleMark.scoreOf(m.assessment, m.project, held).total : null,
         category: m ? m.category : '',
         categoryOverridden: m ? m.categoryOverridden : false,
         remark: m ? m.remark : '',
@@ -63,7 +64,8 @@ router.get('/:cycleId', protect, async (req, res) => {
 
     res.json({
       cycle: { _id: cycle._id, number: cycle.number, name: cycle.name, status: cycle.status,
-               batch: cycle.batch, startDate: cycle.startDate, endDate: cycle.endDate },
+               batch: cycle.batch, startDate: cycle.startDate, endDate: cycle.endDate,
+               assessmentHeld: held, outOf: held ? 200 : 100 },
       rosterLocked: !!cycle.batch.rosterLocked,
       sessionsInCycle: attendance.sessions,
       rows,
@@ -90,6 +92,7 @@ async function saveCycleMarks(user, cycleId, inputRows) {
       return { status: 403, body: { message: 'Not your batch' } };
 
     const rows = Array.isArray(inputRows) ? inputRows : [];
+    const held = cycle.assessmentHeld !== false;
 
     // Validate the WHOLE sheet before writing any of it. This used to be a
     // row-by-row loop, so one out-of-range mark threw halfway through and left
@@ -103,15 +106,16 @@ async function saveCycleMarks(user, cycleId, inputRows) {
       let assessment = null, project = null, category = '';
 
       if (r.status === 'evaluated') {
-        assessment = num(r.assessment);
+        // No assessment this cycle → nothing to store for it.
+        assessment = held ? num(r.assessment) : null;
         project    = num(r.project);
-        if (!Number.isFinite(assessment) || assessment < 0 || assessment > 100)
+        if (held && (!Number.isFinite(assessment) || assessment < 0 || assessment > 100))
           errors.push(`${label}: assessment must be a number from 0 to 100`);
         if (!Number.isFinite(project) || project < 0 || project > 100)
           errors.push(`${label}: project must be a number from 0 to 100`);
         category = (r.categoryOverridden && r.category)
           ? r.category
-          : CycleMark.categoryFromMarks(assessment, project);
+          : CycleMark.categoryFromMarks(assessment, project, held);
         if (!['excellent', 'moderate', 'basic', 'zero'].includes(category))
           errors.push(`${label}: unknown category "${r.category}"`);
       }
@@ -149,11 +153,12 @@ router.get('/:cycleId/top3-suggestion', protect, async (req, res) => {
     if (!cycle) return res.status(404).json({ message: 'Cycle not found' });
     if (!(await canAccessBatch(req.user, cycle.batch)))
       return res.status(403).json({ message: 'Not your batch' });
+    const held = cycle.assessmentHeld !== false;
     const marks = await CycleMark.find({ cycle: cycle._id, status: 'evaluated' })
       .populate('student', 'name roll');
     const ranked = marks
       .map(m => ({ student: m.student?._id, name: m.student?.name, roll: m.student?.roll,
-                   total: (m.assessment||0) + (m.project||0) }))
+                   total: CycleMark.scoreOf(m.assessment, m.project, held).total }))
       .filter(x => x.total > 0)
       .sort((a,b) => b.total - a.total)
       .slice(0, 3)
@@ -168,19 +173,46 @@ router.get('/student/:studentId/history', protect, async (req, res) => {
     const owner = await Student.findById(req.params.studentId).select('batch');
     if (!owner) return res.status(404).json({ message: 'Student not found' });
     const marks = await CycleMark.find({ student: req.params.studentId, status: 'evaluated' })
-      .populate('cycle', 'number name startDate')
+      .populate('cycle', 'number name startDate assessmentHeld')
       .sort('createdAt');
     const history = marks
       .filter(m => m.cycle)
       .sort((a,b) => new Date(a.cycle.startDate) - new Date(b.cycle.startDate))
       .map(m => ({ cycleNumber: m.cycle.number, cycleName: m.cycle.name,
-                   total: (m.assessment||0)+(m.project||0), category: m.category }));
+                   ...CycleMark.scoreOf(m.assessment, m.project, m.cycle.assessmentHeld !== false),
+                   category: m.category }));
     res.json({ history, baseline: history[0] || null, current: history[history.length-1] || null });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// PATCH /api/marks/:cycleId/assessment-held  body: { held: true|false }
+// Was the MCQ assessment held this cycle? (It is optional.) Changing it
+// re-computes every automatic category in the cycle; manual overrides stay.
+router.patch('/:cycleId/assessment-held', protect, async (req, res) => {
+  try {
+    const r = await setAssessmentHeld(req.user, req.params.cycleId, req.body.held);
+    res.status(r.status).json(r.body);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+async function setAssessmentHeld(user, cycleId, heldInput) {
+  if (typeof heldInput !== 'boolean') return { status: 400, body: { message: 'held must be true or false' } };
+  const cycle = await Cycle.findById(cycleId);
+  if (!cycle) return { status: 404, body: { message: 'Cycle not found' } };
+  if (!(await canAccessBatch(user, cycle.batch)))
+    return { status: 403, body: { message: 'Not your batch' } };
+  cycle.assessmentHeld = heldInput;
+  await cycle.save();
+  const marks = await CycleMark.find({ cycle: cycle._id, status: 'evaluated', categoryOverridden: { $ne: true } });
+  if (marks.length) await CycleMark.bulkWrite(marks.map(m => ({
+    updateOne: { filter: { _id: m._id }, update: { $set: {
+      category: CycleMark.categoryFromMarks(m.assessment, m.project, heldInput), updatedBy: user._id } } },
+  })));
+  return { status: 200, body: { assessmentHeld: heldInput, recategorised: marks.length } };
+}
+
 // Shared with the MCP tools (mcp/tools.js) so the AI sees the exact same
-// attendance numbers as the Marks Sheet. Additive only — routes unchanged.
-router.__shared = { studentAttendance, saveCycleMarks };
+// attendance numbers as the Marks Sheet, and saves through the same logic.
+router.__shared = { studentAttendance, saveCycleMarks, setAssessmentHeld };
 
 module.exports = router;

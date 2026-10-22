@@ -75,11 +75,13 @@ const attendancePct = (s) =>
 
 // Shared explanation, pasted into descriptions so the AI reads marks correctly.
 const MARKS_RULES =
-  'Marks rules: each student per cycle has assessment /100 and project /100 (total /200). ' +
+  'Marks rules: each student per cycle has project /100 and, ONLY in cycles where the assessment was held, an MCQ assessment /100. ' +
+  'The assessment is optional: when a cycle has assessmentHeld=false the score is the project mark out of 100; ' +
+  'otherwise project + assessment out of 200 (see outOf). ' +
   'state "evaluated" = has marks; state "zero" = evaluated but total is 0; ' +
   'state "not-evaluated" = absent on evaluation day or joined late — NO marks, NO category, ' +
   'and must NOT be counted as 0 or included in averages. ' +
-  'Category from total %: excellent ≥75, moderate 50–74, basic 1–49, zero = 0; ' +
+  'Category from score %: excellent ≥75, moderate 50–74, basic 1–49, zero = 0; ' +
   'a trainer may override the category (categoryOverridden=true).';
 
 // ── Tool definitions ─────────────────────────────────────────────────
@@ -245,6 +247,7 @@ def({
         batch: c.batch?.name, batchId: c.batch?._id, track: c.batch?.track,
         start: ymd(c.startDate), end: ymd(c.endDate),
         reportSubmitted: !!c.report?.submitted,
+        assessmentHeld: c.assessmentHeld !== false,
       })),
     };
   },
@@ -269,16 +272,18 @@ def({
     const marks = await CycleMark.find({ cycle: cycle._id });
     const byStudent = Object.fromEntries(marks.map(m => [m.student.toString(), m]));
     const att = await studentAttendance(cycle.batch._id, cycle.startDate, cycle.endDate);
+    const held = cycle.assessmentHeld !== false;
+    const outOf = held ? 200 : 100;
 
     let rows = students.map(s => {
       const m = byStudent[s._id.toString()];
       const evaluated = m && m.status === 'evaluated';
-      const total = evaluated ? (m.assessment || 0) + (m.project || 0) : null;
+      const total = evaluated ? CycleMark.scoreOf(m.assessment, m.project, held).total : null;
       return {
         studentId: s._id, roll: s.roll, name: s.name,
         attendancePct: att.pctFor(s._id.toString()),
         state: !evaluated ? 'not-evaluated' : total === 0 ? 'zero' : 'evaluated',
-        assessment: evaluated ? m.assessment : null,
+        assessment: evaluated && held ? m.assessment : null,
         project:    evaluated ? m.project : null,
         total,
         category: evaluated ? m.category : null,
@@ -293,7 +298,9 @@ def({
       evaluated: evaluatedRows.length,
       notEvaluated: rows.length - evaluatedRows.length,
       byCategory: ['excellent', 'moderate', 'basic', 'zero'].reduce((o, c) => (o[c] = evaluatedRows.filter(r => r.category === c).length, o), {}),
-      averageTotalOf200: evaluatedRows.length
+      assessmentHeld: held,
+      outOf,
+      averageScore: evaluatedRows.length
         ? Math.round((evaluatedRows.reduce((a, r) => a + r.total, 0) / evaluatedRows.length) * 10) / 10 : null,
       sessionsInCycle: att.sessions,
       suggestedTop3: evaluatedRows.filter(r => r.total > 0).sort((a, b) => b.total - a.total).slice(0, 3)
@@ -419,12 +426,13 @@ def({
 
     const profiles = [];
     for (const s of students) {
-      const marks = await CycleMark.find({ student: s._id, status: 'evaluated' }).populate('cycle', 'number name startDate');
+      const marks = await CycleMark.find({ student: s._id, status: 'evaluated' }).populate('cycle', 'number name startDate assessmentHeld');
       const history = marks.filter(m => m.cycle)
         .sort((a, b) => new Date(a.cycle.startDate) - new Date(b.cycle.startDate))
         .map(m => ({ cycleNumber: m.cycle.number, cycleName: m.cycle.name || null,
                      assessment: m.assessment, project: m.project,
-                     total: (m.assessment || 0) + (m.project || 0), category: m.category, remark: m.remark || '' }));
+                     ...CycleMark.scoreOf(m.assessment, m.project, m.cycle.assessmentHeld !== false),
+                     category: m.category, remark: m.remark || '' }));
       const notEvaluated = await CycleMark.countDocuments({ student: s._id, status: 'not-evaluated' });
       const top3 = await Topper.find({ student: s._id }).select('rank cycle project');
       const reportTop3 = await Cycle.find({ 'report.top3.student': s._id }).select('number report.top3.rank report.top3.student report.top3.github');

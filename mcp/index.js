@@ -52,7 +52,7 @@ const INSTRUCTIONS =
   'You act as the signed-in user: superadmin sees all batches, trainers only their own. ' +
   'Use search or list_batches/list_cycles to find ids before calling detail tools. ' +
   'Never treat a "not-evaluated" student as scoring 0. ' +
-  'WRITE tools (fill_cycle_report, update_cycle_marks, set_cycle_top3, save_daily_log, save_cycle_plan_class) never save on ' +
+  'WRITE tools (fill_cycle_report, update_cycle_marks, set_assessment_held, set_cycle_top3, save_daily_log, save_cycle_plan_class and the admin tools) never save on ' +
   'the first call: they return a preview. Always show that preview to the user in plain words and wait for an explicit "yes" ' +
   'before calling again with confirm=true and the preview_token. If the user changes anything, make a new preview. ' +
   'There are no delete tools. To "remove" something use the reversible tools: update_user active=false (deactivate a login), ' +

@@ -35,6 +35,7 @@ const call = async (c, name, args = {}) => {
   return { isError: !!r.isError, data: r.structuredContent, text: r.content?.[0]?.text };
 };
 // preview, then confirm with the token (what the AI does after the user says yes)
+const yes2 = (...a) => previewAndConfirm(...a);
 async function previewAndConfirm(c, name, args) {
   const p = await call(c, name, args);
   if (p.isError) return { preview: p, saved: p };
@@ -84,7 +85,7 @@ async function previewAndConfirm(c, name, args) {
   console.log('\n1. Tool list');
   const { tools } = await cS.listTools();
   const W = ['fill_cycle_report', 'update_cycle_marks', 'set_cycle_top3', 'save_daily_log', 'save_cycle_plan_class'];
-  ok('trainer sees 19 tools (11 read + 5 write + 3 student/plan)', tools.length === 19, tools.length);
+  ok('trainer sees 20 tools (11 read + 6 write + 3 student/plan)', tools.length === 20, tools.length);
   ok('write tools are NOT marked read-only', W.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === false));
   const READ = ['whoami','search','list_batches','get_batch_roster','list_cycles','get_cycle_marks','get_cycle_plan','get_daily_logs','get_student_profile','get_today_overview','get_hall_of_fame'];
   ok('read tools still read-only', READ.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === true));
@@ -122,7 +123,7 @@ async function previewAndConfirm(c, name, args) {
   const badRoll = await call(cS, 'update_cycle_marks', { cycle_id: String(cyc._id), rows: [{ roll: '999', state: 'not-evaluated' }] });
   ok('unknown roll → refused, nothing saved', badRoll.isError && /999 is not in this batch/.test(badRoll.text));
   const half = await call(cS, 'update_cycle_marks', { cycle_id: String(cyc._id), rows: [{ roll: '102', state: 'evaluated', assessment: 50 }] });
-  ok('evaluated without project → refused', half.isError && /both assessment and project/.test(half.text));
+  ok('evaluated without project → refused', half.isError && /needs a project mark/.test(half.text));
   const mArgs = { cycle_id: String(cyc._id), rows: [
     { roll: '101', state: 'evaluated', assessment: 70, project: 80 },
     { roll: '102', state: 'evaluated', assessment: 0, project: 0 },
@@ -183,6 +184,31 @@ async function previewAndConfirm(c, name, args) {
   ok('edit kept title + trainer, set time', p1.classes.length === 1 && p1.classes[0].title === 'Express routing' && p1.classes[0].time === '10:00' && p1.classes[0].trainer.name === 'Mr Samant');
   await previewAndConfirm(cS, 'save_cycle_plan_class', { cycle_id: String(cyc._id), title: 'Middleware' });
   ok('second class gets number 2', (await CyclePlan.findOne({ cycle: cyc._id })).classes.map(c => c.number).join(',') === '1,2');
+
+  console.log('\n7b. Optional assessment (assessment not held this cycle)');
+  // Cycle 1 (closed) gets marks with the assessment NOT held: project only.
+  const ah = await yes2(cS, 'set_assessment_held', { cycle_id: String(closed._id), held: false });
+  ok('set_assessment_held preview → saved', ah.preview.data?.mode === 'preview' && ah.saved.data?.assessmentHeld === false, ah.saved.text);
+  ok('cycle flag stored', (await Cycle.findById(closed._id)).assessmentHeld === false);
+  const withA = await call(cS, 'update_cycle_marks', { cycle_id: String(closed._id), rows: [{ roll: '101', state: 'evaluated', assessment: 50, project: 80 }] });
+  ok('assessment refused when not held', withA.isError && /no assessment was held/.test(withA.text));
+  const po = await yes2(cS, 'update_cycle_marks', { cycle_id: String(closed._id), rows: [
+    { roll: '101', state: 'evaluated', project: 80 }, { roll: '102', state: 'evaluated', project: 40 } ] });
+  ok('project-only preview: 80/100 = excellent', po.preview.data.changes[0].to.total === 80 && po.preview.data.changes[0].to.outOf === 100 && po.preview.data.changes[0].to.category === 'excellent');
+  ok('project-only saved', po.saved.data?.saved === true, po.saved.text);
+  const m1 = await CycleMark.findOne({ cycle: closed._id, student: S[0]._id });
+  ok('stored: assessment null, project 80, excellent', m1.assessment === null && m1.project === 80 && m1.category === 'excellent');
+  const r1 = await call(cS, 'get_cycle_marks', { cycle_id: String(closed._id) });
+  ok('read tool: outOf 100, average (80+40)/2 = 60', r1.data.summary.outOf === 100 && r1.data.summary.averageScore === 60);
+  const web1 = await http('GET', `/api/marks/${closed._id}`, { token: J(samant) });
+  ok('website GET shows outOf 100 + total 80', web1.body.cycle.outOf === 100 && web1.body.rows.find(r => r.roll === '101').total === 80);
+  ok('40/100 = basic', (await CycleMark.findOne({ cycle: closed._id, student: S[1]._id })).category === 'basic');
+  // Switching back to "held" recalculates: 80/200 = 40% → basic
+  await yes2(cS, 'set_assessment_held', { cycle_id: String(closed._id), held: true });
+  ok('back to held → recategorised 80/200 = basic', (await CycleMark.findOne({ cycle: closed._id, student: S[0]._id })).category === 'basic');
+  ok('other batch trainer cannot change it', (await call(cD, 'set_assessment_held', { cycle_id: String(closed._id), held: false })).isError);
+  const webPatch = await http('PATCH', `/api/marks/${closed._id}/assessment-held`, { token: J(samant), body: { held: 'no' } });
+  ok('website route validates held', webPatch.status === 400);
 
   console.log('\n8. Audit log');
   await new Promise(r => setTimeout(r, 300));

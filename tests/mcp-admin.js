@@ -72,8 +72,8 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   console.log('\n1. Who sees which tools');
   const aNames = (await cA.listTools()).tools.map(t => t.name);
   const tNames = (await cT.listTools()).tools.map(t => t.name);
-  ok('superadmin sees 31 tools', aNames.length === 31, aNames.length);
-  ok('trainer sees 19 tools (no admin ones)', tNames.length === 19, tNames.length);
+  ok('superadmin sees 32 tools', aNames.length === 32, aNames.length);
+  ok('trainer sees 20 tools (no admin ones)', tNames.length === 20, tNames.length);
   ok('trainer does NOT see create_user / update_batch / create_cycles', !['create_user', 'update_batch', 'create_cycles', 'list_users'].some(n => tNames.includes(n)));
   ok('trainer sees add_students / edit_student / set_batch_plan', ['add_students', 'edit_student', 'set_batch_plan'].every(n => tNames.includes(n)));
   ok('no tool can delete', !aNames.some(n => /delete|remove_/.test(n)));
