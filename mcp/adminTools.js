@@ -519,6 +519,7 @@ admin(writeTool({
     '(India time; empty = default Saturday after the project day, 7 PM), excuse a batch with a visible reason, and record WHEN each ' +
     'piece of cycle work was completed and BY WHOM — report (cycle form), marks, top3, plan. Use completions for cycles finished ' +
     'before tracking existed. done_by "trainer" credits the batch trainer (give trainer_name if the batch has several); ' +
+    'Also sets the cycle LEAD trainer and the OWNER of each task (only the owner is scored for it; default owner = lead). ' +
     '"admin" means an admin did it and the trainer gets no credit. completed_at "" clears that record.',
   input: {
     cycle_id: z.string(),
@@ -526,6 +527,11 @@ admin(writeTool({
     project_date: isoDate.optional(),
     deadline: z.string().regex(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})?$/).optional().describe('YYYY-MM-DDTHH:mm India time, or "" for the default'),
     excuse_note: z.string().max(300).optional().describe('"" removes the excuse'),
+    lead_trainer: z.string().optional().describe('Name of the batch trainer who leads this cycle ("" = default: first trainer)'),
+    owners: z.array(z.object({
+      item: z.enum(['report', 'marks', 'top3', 'plan']),
+      trainer_name: z.string().describe('"" = back to the lead'),
+    })).max(4).optional().describe('Who must do each task; default is the lead'),
     completions: z.array(z.object({
       item: z.enum(['report', 'marks', 'top3', 'plan']),
       completed_at: z.string().regex(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})?$/).describe('YYYY-MM-DDTHH:mm India time, or "" to clear'),
@@ -544,6 +550,25 @@ admin(writeTool({
     if (args.project_date !== undefined) { body.projectDate = args.project_date; changes.push({ field: 'project_date', from: c.track?.projectDate ? ymd(c.track.projectDate) : `default (${ymd(c.endDate)})`, to: args.project_date }); }
     if (args.deadline !== undefined) { body.deadline = args.deadline; changes.push({ field: 'deadline', from: fmt(c.track?.deadline), to: args.deadline ? args.deadline.replace('T', ' ') + ' IST' : 'default (Saturday after project day, 7 PM)' }); }
     if (args.excuse_note !== undefined) { body.excusedNote = args.excuse_note; changes.push({ field: 'excuse', from: c.track?.excusedNote || '', to: args.excuse_note }); }
+    const elig = (c.batch?.trainers || []).filter(t => t.isActive !== false && !/\(review\)/i.test(t.name));
+    const pickT = (name) => {
+      const m = elig.filter(t => rx(name).test(t.name));
+      if (m.length !== 1) throw new ToolError(`"${name}" must match exactly one trainer of ${c.batch.name}: ${elig.map(t => t.name).join(', ') || 'none'}.`);
+      return m[0];
+    };
+    if (args.lead_trainer !== undefined) {
+      const t = args.lead_trainer ? pickT(args.lead_trainer) : null;
+      body.lead = t ? String(t._id) : null;
+      changes.push({ field: 'lead', from: elig.find(x => String(x._id) === String(c.track?.lead))?.name || 'default (first trainer)', to: t ? t.name : 'default (first trainer)' });
+    }
+    if (args.owners?.length) {
+      body.owners = {};
+      for (const o of args.owners) {
+        const t = o.trainer_name ? pickT(o.trainer_name) : null;
+        body.owners[o.item] = t ? String(t._id) : null;
+        changes.push({ field: `owner of ${o.item}`, from: elig.find(x => String(x._id) === String(c.track?.owners?.[o.item]))?.name || 'lead', to: t ? t.name : 'lead' });
+      }
+    }
     if (args.completions?.length) {
       body.stamps = {};
       const trainers = (c.batch?.trainers || []).filter(t => t.isActive !== false && !/\(review\)/i.test(t.name));

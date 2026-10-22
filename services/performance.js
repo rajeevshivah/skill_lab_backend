@@ -15,6 +15,17 @@
 //    daily log same day 35 · report+marks+Top3 on time 30 (10 each)
 //    cycle plan before start 15 · attendance taken 10 · student outcomes 10
 //  Anything done by an admin gives the trainer 0 for that part.
+//
+//  Who is scored for what (batches with several trainers):
+//    lead          — one trainer per cycle (default: the batch's first trainer)
+//    owners.report/marks/top3/plan — who must do each task (default: the lead)
+//    daily logs    — each class day belongs to the trainer planned for it in the
+//                    cycle plan; if none is planned, to the trainer who logged it;
+//                    a day nobody (or only an admin) logged with no planned
+//                    trainer counts for every trainer of the batch
+//    outcomes      — shared by all trainers of the batch
+//    waits         — an owner can say "waiting on <trainer>"; once the admin
+//                    approves it, lateness after that moment moves to that trainer
 // ─────────────────────────────────────────────────────────────────────
 const Batch     = require('../models/Batch');
 const Student   = require('../models/Student');
@@ -27,6 +38,8 @@ const IST = 330 * 60 * 1000;
 const WEIGHTS = { logs: 35, report: 10, marks: 10, top3: 10, plan: 15, attendance: 10, outcomes: 10 };
 
 const pad = (n) => String(n).padStart(2, '0');
+const isReviewer = (u) => /\(review\)/i.test(u?.name || '');
+const sid = (x) => x == null ? '' : String(x._id || x);
 // calendar day of a stored "day" date (stored at server-local midnight)
 const dayYmd = (d) => { const x = new Date(d); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
 // calendar day in India of a real timestamp
@@ -120,10 +133,14 @@ async function scoreCycle(cycle, now = new Date()) {
   const [logs, plan] = await Promise.all([
     DailyLog.find({ batch: cycle.batch, date: { $gte: cycle.startDate, $lte: cycle.endDate } })
       .select('date createdAt loggedBy firstLoggedBy attendanceTaken').lean(),
-    CyclePlan.findOne({ cycle: cycle._id }).select('classes.date').lean(),
+    CyclePlan.findOne({ cycle: cycle._id }).select('classes.date classes.trainer').lean(),
   ]);
-  const batch = await Batch.findById(cycle.batch).select('trainers').lean();
-  const isTrainer = (u) => (batch?.trainers || []).some(x => String(x) === String(u));
+  const batch = await Batch.findById(cycle.batch).select('trainers').populate('trainers', 'name isActive').lean();
+  const isTrainer = (u) => (batch?.trainers || []).some(x => sid(x) === sid(u));
+  const eligible = (batch?.trainers || []).filter(x => x.isActive !== false && !isReviewer(x));
+  const isEligible = (u) => eligible.some(x => sid(x) === sid(u));
+  const plannedBy = new Map();
+  for (const c of plan?.classes || []) if (c.date && c.trainer) plannedBy.set(c.date, sid(c.trainer));
   const byDay = new Map(logs.map(l => [dayYmd(l.date), l]));
   const days = new Set([...byDay.keys()]);
   for (const c of plan?.classes || []) if (c.date && c.date >= startYmd && c.date <= lastDay) days.add(c.date);
@@ -131,10 +148,12 @@ async function scoreCycle(cycle, now = new Date()) {
   for (const d of [...days].sort()) {
     if (d > lastDay) continue;
     const l = byDay.get(d);
-    if (!l) { if (d === today) continue; logDays.push({ date: d, state: 'missing' }); continue; }
+    const planned = plannedBy.has(d) && isEligible(plannedBy.get(d)) ? plannedBy.get(d) : null;
+    if (!l) { if (d === today) continue; logDays.push({ date: d, state: 'missing', resp: planned || '*' }); continue; }
     const who = l.firstLoggedBy || l.loggedBy;
     const state = !isTrainer(who) ? 'admin' : istYmd(l.createdAt) <= d ? 'on-time' : 'late';
-    logDays.push({ date: d, state, attendance: !!l.attendanceTaken && state !== 'admin' });
+    logDays.push({ date: d, state, attendance: !!l.attendanceTaken && state !== 'admin',
+      resp: planned || (isEligible(who) ? sid(who) : '*') });
   }
   if (logDays.length) {
     const n = logDays.length;
@@ -173,7 +192,50 @@ async function scoreCycle(cycle, now = new Date()) {
   else overall = trio.some(i => i.state === 'excused') ? 'excused' : 'on-time';
   const completedAt = trio.every(i => i.at) ? new Date(Math.max(...trio.map(i => +i.at))) : null;
 
+  // ── Per-trainer scores (who is responsible for what) ──
+  const lead = eligible.find(x => sid(x) === sid(t.lead)) || eligible[0] || null;
+  const owners = {};
+  for (const k of ['report', 'marks', 'top3', 'plan'])
+    owners[k] = eligible.find(x => sid(x) === sid(t.owners?.[k])) || lead;
+  const approved = (t.waits || []).filter(w => w.status === 'approved');
+  const perTrainer = eligible.map(tr => {
+    const me = sid(tr), mine = {};
+    for (const k of ['report', 'marks', 'top3']) {
+      const base = items[k], w = approved.filter(x => x.item === k).sort((a, b) => a.raisedAt - b.raisedAt)[0];
+      if (owners[k] && sid(owners[k]) === me) {
+        if (w && (!base.at || w.raisedAt < base.at)) {
+          // owner did their part by the time they flagged the wait
+          mine[k] = { ...deadlineItem({ at: w.raisedAt, admin: false }, deadline, now, excused, WEIGHTS[k]), waitedOn: true };
+        } else mine[k] = base;
+      } else if (w && sid(w.waitingOn) === me) {
+        // the trainer who held things up carries the lateness (only if it was late)
+        const it = deadlineItem({ at: base.at || null, admin: false }, deadline, now, excused, WEIGHTS[k]);
+        if (it.state === 'late' || it.state === 'missing') mine[k] = { ...it, blocking: true };
+      }
+    }
+    if (owners.plan && sid(owners.plan) === me) mine.plan = items.plan;
+    const days = logDays.filter(x => x.resp === me || x.resp === '*');
+    if (days.length) {
+      const n = days.length;
+      const lp = days.reduce((a, x) => a + (x.state === 'on-time' ? 1 : x.state === 'late' ? 0.5 : 0), 0);
+      mine.logs = { state: 'counted', points: WEIGHTS.logs * lp / n, max: WEIGHTS.logs, days: n,
+        onTime: days.filter(x => x.state === 'on-time').length, late: days.filter(x => x.state === 'late').length,
+        admin: days.filter(x => x.state === 'admin').length, missing: days.filter(x => x.state === 'missing').length };
+      const ap = days.filter(x => x.attendance).length;
+      mine.attendance = { state: 'counted', points: WEIGHTS.attendance * ap / n, max: WEIGHTS.attendance, taken: ap, days: n };
+    }
+    mine.outcomes = items.outcomes;
+    const mx = Object.values(mine).reduce((a, i) => a + i.max, 0);
+    const pt = Object.values(mine).reduce((a, i) => a + i.points, 0);
+    return { id: sid(tr), name: tr.name, isLead: !!lead && sid(lead) === me,
+      owns: Object.keys(owners).filter(k => owners[k] && sid(owners[k]) === me),
+      items: mine, score: mx ? Math.round(pt / mx * 100) : null };
+  });
+
   return {
+    lead: lead ? { id: sid(lead), name: lead.name } : null,
+    owners: Object.fromEntries(Object.entries(owners).map(([k, v]) => [k, v ? { id: sid(v), name: v.name } : null])),
+    perTrainer,
     deadline, projectDate: projectDayOf(cycle), excusedNote: t.excusedNote || '',
     tracked: !!t.tracked, items, overall, completedAt,
     lateBy: completedAt && completedAt > deadline ? Math.round((completedAt - deadline) / DAY * 10) / 10 : 0,
@@ -182,4 +244,4 @@ async function scoreCycle(cycle, now = new Date()) {
   };
 }
 
-module.exports = { WEIGHTS, defaultDeadline, deadlineOf, stamp, marksComplete, scoreCycle, dayYmd, istYmd, ymdToDay, istToDate };
+module.exports = { isReviewer, sid, WEIGHTS, defaultDeadline, deadlineOf, stamp, marksComplete, scoreCycle, dayYmd, istYmd, ymdToDay, istToDate };

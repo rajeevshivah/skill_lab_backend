@@ -525,24 +525,35 @@ def({
   name: 'get_trainer_performance',
   title: 'Trainer performance',
   description:
-    'The Trainer Performance dashboard for one cycle number (default: the latest tracked one): per batch the project day, ' +
+    'The Trainer Performance dashboard. Cycles are grouped by DEADLINE DATE (period), so batches that finished together show together ' +
+    'even if their cycle numbers differ (e.g. 1st-year Cycle 1 and 3rd-sem Cycle 3 both due 17 Oct). Pass deadline_date (YYYY-MM-DD) ' +
+    'or cycle_number; default = the latest tracked period. Per batch: project day, ' +
     'deadline (default Saturday after the project day, 7 PM IST), when report/marks/Top 3/plan were first completed and by whom ' +
     '(admin=true means done by an admin, not the trainer — the trainer gets no credit), overall status (on-time / late / admin / ' +
     'missing / pending), daily-log punctuality and a score out of 100; plus each trainer\'s score for that cycle and semester average. ' +
     'Score = daily log same day 35, report 10, marks 10, Top 3 10, cycle plan before start 15, attendance taken 10, outcomes 10, ' +
-    'counted only over parts already due. Untracked cycles (before tracking began) have no score.',
-  input: { cycle_number: z.number().int().min(1).max(100).optional().describe('Cycle number, e.g. 4') },
+    'counted only over parts already due. Untracked cycles (before tracking began) have no score. ' +
+    'Batches with several trainers: each cycle has a lead and an owner per task (report, marks, top3, plan; default = lead) — only ' +
+    'the owner is scored for a task; each class day counts for the trainer planned for it (else who logged it); an admin-approved ' +
+    '"waiting on <trainer>" moves lateness to that trainer. perTrainer lists each trainer\'s own score and items.',
+  input: {
+    cycle_number: z.number().int().min(1).max(100).optional().describe('Cycle number, e.g. 4'),
+    deadline_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Deadline day of the period, e.g. 2026-10-17'),
+  },
   async handler(args) {
     const Semester = require('../models/Semester');
     const { buildDashboard } = require('../routes/performance').__shared;
     const sem = await Semester.findOne({ status: 'active' });
     if (!sem) throw new ToolError('No active semester.');
-    const d = await buildDashboard(sem, args.cycle_number || null);
+    const d = await buildDashboard(sem, { period: args.deadline_date || null, number: args.cycle_number || null });
     return {
-      semester: d.semester?.name, cycle: d.number,
-      rounds: d.rounds, trainers: d.trainers,
+      semester: d.semester?.name, period: d.period, cycle: d.number,
+      periods: d.periods, trainers: d.trainers,
       batches: d.rows.map(r => ({
-        batch: r.batch, track: r.track, trainers: r.trainers.map(t => t.name), tracked: r.tracked,
+        batch: r.batch, cycle: r.number, track: r.track, trainers: r.trainers.map(t => t.name), tracked: r.tracked,
+        lead: r.lead?.name, owners: Object.fromEntries(Object.entries(r.owners || {}).map(([k, v]) => [k, v?.name || null])),
+        perTrainer: r.perTrainer.map(p => ({ name: p.name, isLead: p.isLead, owns: p.owns, score: p.score })),
+        waits: r.waits.filter(w => w.status !== 'rejected'),
         projectDate: r.projectDate, deadline: r.deadline, overall: r.overall, completedAt: r.completedAt,
         lateByDays: r.lateBy, excusedNote: r.excusedNote || undefined, score: r.score, who: r.who,
         dailyLogs: r.items.logs, attendance: r.items.attendance, cyclePlan: r.items.plan.state,

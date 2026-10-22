@@ -190,6 +190,15 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
     ok('accountability: deadline + admin stamp saved', acc.saved.data?.deadline === '2026-10-17 21:00 IST' && dc.track.report.admin === true, acc.saved.text);
     const noTr = await call(cA, 'set_cycle_accountability', { cycle_id: String(daCycle._id), completions: [{ item: 'marks', completed_at: '2026-10-17T10:00', done_by: 'trainer' }] });
     ok('trainer credit needs a trainer on the batch', noTr.isError && /trainer/.test(noTr.text), noTr.text);
+    await User.updateOne({ _id: saif._id }, { isActive: true });
+    await Batch.updateOne({ _id: da._id }, { $set: { trainers: [saif._id, samant._id] } });
+    const lo = await yes(cA, 'set_cycle_accountability', { cycle_id: String(daCycle._id), lead_trainer: 'Samant', owners: [{ item: 'marks', trainer_name: 'Saif' }] });
+    const dc2 = await Cycle.findById(daCycle._id);
+    ok('lead + owner set by name', !lo.saved.isError && String(dc2.track.lead) === String(samant._id) && String(dc2.track.owners.marks) === String(saif._id), lo.saved.text || lo.preview.text);
+    const bad = await call(cA, 'set_cycle_accountability', { cycle_id: String(daCycle._id), lead_trainer: 'Nobody' });
+    ok('unknown lead name refused', bad.isError && /exactly one trainer/.test(bad.text), bad.text);
+    const gp = await call(cA, 'get_trainer_performance', {});
+    ok('get_trainer_performance returns periods', !gp.isError && Array.isArray(gp.data?.periods), gp.text?.slice(0, 200));
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

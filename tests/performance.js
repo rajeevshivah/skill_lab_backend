@@ -165,7 +165,7 @@ const ymd = (d) => perf.dayYmd(d);
   ok('row shows who did each item', row.who.report.by === 'Mr Samant' && row.who.report.admin === false);
   ok('reviewer account not listed as trainer', !row.trainers.some(t => /review/i.test(t.name)));
   ok('trainer table has Samant and Deepu, not MD', d.body.trainers.length === 2 && !d.body.trainers.some(t => /review/i.test(t.name)), JSON.stringify(d.body.trainers));
-  ok('rounds list includes untracked cycle 3', d.body.rounds.some(x => x.number === 3 && !x.tracked));
+  ok('periods list includes untracked cycle 3', d.body.periods.some(x => x.numbers.includes(3) && !x.tracked), JSON.stringify(d.body.periods));
   const d3 = await http('GET', '/api/performance?number=3', { token: T(deepu) });
   ok('untracked cycle has no score', d3.body.rows[0].score === null && d3.body.rows[0].tracked === false);
 
@@ -198,6 +198,86 @@ const ymd = (d) => perf.dayYmd(d);
   r = await http('PATCH', '/api/performance/round/3', { token: T(admin), body: { tracked: true } });
   const o3 = await Cycle.findById(old._id);
   ok('round toggle tracks every cycle of that number', r.status === 200 && o3.track.tracked === true);
+
+  console.log('\n— two trainers: lead, owners, per-day credit, waiting on');
+  {
+    const A = await User.create({ name: 'Trainer A', email: 'ta@x.com', password: 'longpassword1', role: 'trainer' });
+    const B = await User.create({ name: 'Trainer B', email: 'tb@x.com', password: 'longpassword1', role: 'trainer' });
+    const X = await User.create({ name: 'Outsider', email: 'tx@x.com', password: 'longpassword1', role: 'trainer' });
+    const duo = await Batch.create({ name: 'Duo Batch', semester: sem._id, trainers: [A._id, B._id] });
+    const st = await Student.create({ name: 'Ravi', roll: '901', batch: duo._id, semester: sem._id });
+    const cy = await Cycle.create({ batch: duo._id, semester: sem._id, number: 7, startDate: day(-10), endDate: day(-3),
+      track: { tracked: true, deadline: new Date(Date.now() - 2 * DAY) } });
+    // 1st-year style batch: different cycle number, same deadline → same period
+    const other = await Cycle.create({ batch: bca._id, semester: sem._id, number: 1, startDate: day(-60), endDate: day(-3),
+      track: { tracked: true, deadline: new Date(Date.now() - 2 * DAY) } });
+    const per = perf.istYmd(perf.deadlineOf(cy));
+    let dd = await http('GET', `/api/performance?period=${per}`, { token: T(A) });
+    ok('period groups cycles with different numbers but the same deadline', dd.status === 200 && dd.body.period === per
+      && dd.body.rows.some(r => r.number === 7) && dd.body.rows.some(r => r.number === 1), JSON.stringify(dd.body.rows?.map(r => [r.batch, r.number])));
+    let row = dd.body.rows.find(r => r.batch === 'Duo Batch');
+    ok('default lead = first trainer, owns every task', row.lead?.name === 'Trainer A' && Object.values(row.owners).every(o => o?.name === 'Trainer A'));
+
+    // B owns marks; plan: class on day -9 taught by B, day -8 by A
+    let r = await http('PATCH', `/api/performance/cycle/${cy._id}`, { token: T(admin), body: { owners: { marks: String(B._id) } } });
+    ok('admin sets marks owner = B', r.status === 200);
+    r = await http('PATCH', `/api/performance/cycle/${cy._id}`, { token: T(admin), body: { lead: String(X._id) } });
+    ok('lead must be a trainer of the batch', r.status === 400);
+    await http('PUT', `/api/cycleplans/${cy._id}`, { token: T(A), body: { classes: [
+      { title: 'Day by B', date: ymd(day(-9)), trainer: String(B._id) }, { title: 'Day by A', date: ymd(day(-8)), trainer: String(A._id) }] } });
+    // A logs both days late; B logs nothing of his own
+    for (const d of [-9, -8]) {
+      await http('POST', '/api/logs', { token: T(A), body: { batch: duo._id, date: ymd(day(d)), notes: 'x' } });
+    }
+    await DailyLog.collection.updateOne({ batch: duo._id, date: day(-8) }, { $set: { createdAt: new Date(day(-8).getTime() + 6 * 3600e3) } });
+    // report + top3 done by A on time-ish (before deadline), marks never done
+    await Cycle.updateOne({ _id: cy._id }, { $set: { 'track.report': { at: new Date(Date.now() - 3 * DAY), by: A._id, admin: false },
+      'track.top3': { at: new Date(Date.now() - 3 * DAY), by: A._id, admin: false } } });
+    dd = await http('GET', `/api/performance?period=${per}`, { token: T(B) });
+    row = dd.body.rows.find(r => r.batch === 'Duo Batch');
+    const pA = row.perTrainer.find(p => p.name === 'Trainer A'), pB = row.perTrainer.find(p => p.name === 'Trainer B');
+    ok('missing marks count against owner B, not A', pB.items.marks?.state === 'missing' && !pA.items.marks, JSON.stringify({ a: pA.items.marks, b: pB.items.marks }));
+    ok('report/top3/plan scored only for A', pA.items.report?.state === 'on-time' && !pB.items.report && pA.items.plan && !pB.items.plan);
+    ok('day planned for B counts for B; day planned for A counts for A', pB.items.logs?.days === 1 && pA.items.logs?.days === 1, JSON.stringify({ a: pA.items.logs, b: pB.items.logs }));
+    ok('A logged his own day on time; B\'s day was logged late (by A)', pA.items.logs.onTime === 1 && pB.items.logs.late === 1);
+    ok('A scores higher than B', pA.score > pB.score, `${pA.score} vs ${pB.score}`);
+    const tA = dd.body.trainers.find(t => t.name === 'Trainer A');
+    ok('trainer table uses per-trainer scores', tA && tA.thisCycle === pA.score, JSON.stringify(dd.body.trainers));
+
+    // waiting on: B owns marks and waits on A
+    await http('PATCH', `/api/performance/cycle/${cy._id}`, { token: T(admin), body: { owners: { marks: String(A._id) } } });
+    r = await http('POST', `/api/performance/cycle/${cy._id}/wait`, { token: T(B), body: { item: 'marks', waitingOn: String(A._id) } });
+    ok('non-owner cannot raise a wait', r.status === 403, r.status);
+    await http('PATCH', `/api/performance/cycle/${cy._id}`, { token: T(admin), body: { owners: { marks: String(B._id) } } });
+    r = await http('POST', `/api/performance/cycle/${cy._id}/wait`, { token: T(B), body: { item: 'marks', waitingOn: String(X._id) } });
+    ok('can only wait on a trainer of this batch', r.status === 400);
+    // raise it *before* the deadline (simulate by editing raisedAt after)
+    r = await http('POST', `/api/performance/cycle/${cy._id}/wait`, { token: T(B), body: { item: 'marks', waitingOn: String(A._id), note: 'A has not evaluated his half' } });
+    ok('owner raises "waiting on A"', r.status === 201, JSON.stringify(r.body));
+    r = await http('POST', `/api/performance/cycle/${cy._id}/wait`, { token: T(B), body: { item: 'marks', waitingOn: String(A._id) } });
+    ok('only one pending request per task', r.status === 400);
+    let c2 = await Cycle.findById(cy._id);
+    c2.track.waits[0].raisedAt = new Date(Date.now() - 2.5 * DAY); c2.markModified('track'); await c2.save();
+    dd = await http('GET', `/api/performance?period=${per}`, { token: T(B) });
+    row = dd.body.rows.find(r => r.batch === 'Duo Batch');
+    ok('pending wait changes nothing', row.perTrainer.find(p => p.name === 'Trainer B').items.marks.state === 'missing' && row.waits[0].status === 'pending');
+    r = await http('PATCH', `/api/performance/cycle/${cy._id}/wait/${row.waits[0].id}`, { token: T(B), body: { status: 'approved' } });
+    ok('trainer cannot approve', r.status === 403);
+    r = await http('PATCH', `/api/performance/cycle/${cy._id}/wait/${row.waits[0].id}`, { token: T(admin), body: { status: 'approved' } });
+    dd = await http('GET', `/api/performance?period=${per}`, { token: T(B) });
+    row = dd.body.rows.find(r => r.batch === 'Duo Batch');
+    const qA = row.perTrainer.find(p => p.name === 'Trainer A'), qB = row.perTrainer.find(p => p.name === 'Trainer B');
+    ok('approved: owner B is on time (flagged before deadline)', r.status === 200 && qB.items.marks?.state === 'on-time' && qB.items.marks.waitedOn, JSON.stringify(qB.items.marks));
+    ok('approved: lateness moves to A', qA.items.marks?.state === 'missing' && qA.items.marks.blocking, JSON.stringify(qA.items.marks));
+    // marks finally done on time → A not penalised
+    await Cycle.updateOne({ _id: cy._id }, { $set: { 'track.marks': { at: new Date(Date.now() - 2.2 * DAY), by: A._id, admin: false } } });
+    dd = await http('GET', `/api/performance?period=${per}`, { token: T(B) });
+    row = dd.body.rows.find(r => r.batch === 'Duo Batch');
+    ok('if the work ends up on time, the waited-on trainer is not penalised', !row.perTrainer.find(p => p.name === 'Trainer A').items.marks);
+    r = await http('PATCH', `/api/performance/period/${per}`, { token: T(admin), body: { tracked: false } });
+    const oo = await Cycle.findById(other._id);
+    ok('period toggle updates every cycle due that day', r.status === 200 && r.body.updated >= 2 && oo.track.tracked === false, JSON.stringify(r.body));
+  }
 
   console.log(`\n${pass} passed, ${fail} failed`);
   server.close(); await mongoose.disconnect(); if (mongod) await mongod.stop();

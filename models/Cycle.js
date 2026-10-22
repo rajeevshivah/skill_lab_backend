@@ -59,6 +59,25 @@ const trackSchema = new mongoose.Schema({
   marks:  { type: stampSchema, default: null },
   top3:   { type: stampSchema, default: null },
   plan:   { type: stampSchema, default: null },
+  // Who is responsible (batches with several trainers) — see services/performance.js
+  lead:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  owners: {
+    report: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    marks:  { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    top3:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    plan:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  },
+  // "Waiting on another trainer" — counts only once the admin approves it
+  waits: [{
+    item:      { type: String, enum: ['report', 'marks', 'top3'] },
+    owner:     { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    waitingOn: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    note:      { type: String, default: '' },
+    raisedAt:  Date,
+    status:    { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+    decidedAt: Date,
+    decidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  }],
   lateEdits: [{
     _id: false, item: String, at: Date,
     by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, admin: Boolean,
