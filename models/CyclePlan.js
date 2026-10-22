@@ -17,6 +17,12 @@ const cyclePlanSchema = new mongoose.Schema({
   semester: { type: mongoose.Schema.Types.ObjectId, ref: 'Semester', required: true },
   classes:  { type: [classEntrySchema], default: [] },
   updatedBy:{ type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  // What changed, by whom, when (newest last; last 60 kept)
+  changes:  [{
+    _id: false, at: Date,
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    text: String,
+  }],
 }, { timestamps: true });
 
 cyclePlanSchema.index({ batch: 1 });

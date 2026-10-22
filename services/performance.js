@@ -32,6 +32,8 @@ const Student   = require('../models/Student');
 const CycleMark = require('../models/CycleMark');
 const CyclePlan = require('../models/CyclePlan');
 const DailyLog  = require('../models/DailyLog');
+const logRule = require('./logRule');   // logRule.RULE_FROM read at call time (tests override it)
+const { isComplete } = logRule;
 
 const DAY = 24 * 3600 * 1000;
 const IST = 330 * 60 * 1000;
@@ -105,6 +107,17 @@ function deadlineItem(st, deadline, now, excused, max) {
   return { state: 'missing', points: 0, max };
 }
 
+// Credit for one class day's log
+const DAY_CREDIT = { 'on-time': 1, late: 0.5, incomplete: 0.5, 'incomplete-late': 0.25 };
+const dayCredit = (x) => DAY_CREDIT[x.state] || 0;
+const dayCounts = (list) => ({
+  onTime: list.filter(x => x.state === 'on-time').length,
+  late: list.filter(x => x.state === 'late').length,
+  incomplete: list.filter(x => x.state === 'incomplete' || x.state === 'incomplete-late').length,
+  admin: list.filter(x => x.state === 'admin').length,
+  missing: list.filter(x => x.state === 'missing').length,
+});
+
 async function scoreCycle(cycle, now = new Date()) {
   const deadline = deadlineOf(cycle);
   const excused = !!cycle.track?.excusedNote;
@@ -138,7 +151,7 @@ async function scoreCycle(cycle, now = new Date()) {
   const lastDay = dayYmd(cycle.endDate) < today ? dayYmd(cycle.endDate) : today;
   const [logs, plan] = await Promise.all([
     DailyLog.find({ batch: cycle.batch, date: { $gte: cycle.startDate, $lte: cycle.endDate } })
-      .select('date createdAt loggedBy firstLoggedBy attendanceTaken').lean(),
+      .select('date createdAt loggedBy firstLoggedBy attendanceTaken status planClass github notes completeAt').lean(),
     CyclePlan.findOne({ cycle: cycle._id }).select('classes.date classes.trainer').lean(),
   ]);
   const batch = await Batch.findById(cycle.batch).select('trainers').populate('trainers', 'name isActive').lean();
@@ -150,26 +163,29 @@ async function scoreCycle(cycle, now = new Date()) {
   const byDay = new Map(logs.map(l => [dayYmd(l.date), l]));
   const days = new Set([...byDay.keys()]);
   for (const c of plan?.classes || []) if (c.date && c.date >= startYmd && c.date <= lastDay) days.add(c.date);
-  const logDays = [];
+  const logDays = [], noClassDays = [];
   for (const d of [...days].sort()) {
     if (d > lastDay || (fromYmd && d < fromYmd)) continue;
     const l = byDay.get(d);
     const planned = plannedBy.has(d) && isEligible(plannedBy.get(d)) ? plannedBy.get(d) : null;
     if (!l) { if (d === today) continue; logDays.push({ date: d, state: 'missing', resp: planned || '*' }); continue; }
+    if (l.status === 'no-class') { noClassDays.push(d); continue; }   // holiday / cancelled (admin)
     const who = l.firstLoggedBy || l.loggedBy;
-    const state = !isTrainer(who) ? 'admin' : istYmd(l.createdAt) <= d ? 'on-time' : 'late';
+    let state;
+    if (!isTrainer(who)) state = 'admin';
+    else if (d < logRule.RULE_FROM) state = istYmd(l.createdAt) <= d ? 'on-time' : 'late';
+    else if (isComplete(l) && l.completeAt) state = istYmd(l.completeAt) <= d ? 'on-time' : 'late';
+    else if (d === today) continue;                       // still time today to complete it
+    else state = istYmd(l.createdAt) <= d ? 'incomplete' : 'incomplete-late';
     logDays.push({ date: d, state, attendance: !!l.attendanceTaken && state !== 'admin',
       resp: planned || (isEligible(who) ? sid(who) : '*') });
   }
   if (logDays.length) {
     const n = logDays.length;
-    const lp = logDays.reduce((s, x) => s + (x.state === 'on-time' ? 1 : x.state === 'late' ? 0.5 : 0), 0);
+    const lp = logDays.reduce((s, x) => s + dayCredit(x), 0);
     const ap = logDays.filter(x => x.attendance).length;
     items.logs = { state: 'counted', points: WEIGHTS.logs * lp / n, max: WEIGHTS.logs,
-      days: n, onTime: logDays.filter(x => x.state === 'on-time').length,
-      late: logDays.filter(x => x.state === 'late').length,
-      admin: logDays.filter(x => x.state === 'admin').length,
-      missing: logDays.filter(x => x.state === 'missing').length };
+      days: n, ...dayCounts(logDays), noClass: noClassDays.length };
     items.attendance = { state: 'counted', points: WEIGHTS.attendance * ap / n, max: WEIGHTS.attendance, taken: ap, days: n };
   } else {
     items.logs = { state: 'pending', points: 0, max: 0, days: 0 };
@@ -223,10 +239,8 @@ async function scoreCycle(cycle, now = new Date()) {
     const days = logDays.filter(x => x.resp === me || x.resp === '*');
     if (days.length) {
       const n = days.length;
-      const lp = days.reduce((a, x) => a + (x.state === 'on-time' ? 1 : x.state === 'late' ? 0.5 : 0), 0);
-      mine.logs = { state: 'counted', points: WEIGHTS.logs * lp / n, max: WEIGHTS.logs, days: n,
-        onTime: days.filter(x => x.state === 'on-time').length, late: days.filter(x => x.state === 'late').length,
-        admin: days.filter(x => x.state === 'admin').length, missing: days.filter(x => x.state === 'missing').length };
+      const lp = days.reduce((a, x) => a + dayCredit(x), 0);
+      mine.logs = { state: 'counted', points: WEIGHTS.logs * lp / n, max: WEIGHTS.logs, days: n, ...dayCounts(days) };
       const ap = days.filter(x => x.attendance).length;
       mine.attendance = { state: 'counted', points: WEIGHTS.attendance * ap / n, max: WEIGHTS.attendance, taken: ap, days: n };
     }

@@ -178,6 +178,9 @@ async function previewAndConfirm(c, name, args) {
   ok('trainer not in batch → refused', badT.isError && /not a trainer of this batch/.test(badT.text));
   const a1 = await previewAndConfirm(cS, 'save_cycle_plan_class', { cycle_id: String(cyc._id), title: 'Express routing', date: today, trainer: 'samant' });
   ok('class added', a1.saved.data?.classNumber === 1, a1.saved.text);
+  const locked = await previewAndConfirm(cS, 'save_cycle_plan_class', { cycle_id: String(cyc._id), class_number: 1, time: '09:00' });
+  ok('existing plan is locked for trainers', /locked/i.test(locked.saved?.text || locked.preview?.text || ''), (locked.saved?.text || locked.preview?.text || '').slice(0, 200));
+  await Cycle.updateOne({ _id: cyc._id }, { $set: { planOpen: true } });   // admin opens editing
   const a2 = await previewAndConfirm(cS, 'save_cycle_plan_class', { cycle_id: String(cyc._id), class_number: 1, time: '10:00' });
   ok('edit preview shows from → to', a2.preview.data.changes.from.title === 'Express routing' && a2.preview.data.changes.to.time === '10:00');
   const p1 = await CyclePlan.findOne({ cycle: cyc._id }).populate('classes.trainer', 'name');

@@ -5,6 +5,9 @@ const Batch    = require('../models/Batch');
 const Student  = require('../models/Student');
 const Semester = require('../models/Semester');
 const { protect, canAccessBatch, noCotrainer } = require('../middleware/auth');
+const Cycle     = require('../models/Cycle');
+const CyclePlan = require('../models/CyclePlan');
+const { isComplete, GITHUB } = require('../services/logRule');
 const router   = express.Router();
 
 function dayKey(d) {
@@ -127,6 +130,10 @@ router.post('/', protect, async (req, res) => {
 // Returns { status, body } instead of writing to a response.
 async function upsertDailyLog(user, input) {
     const { batch, date, topicsCovered, status, notes, prepLink, attendance } = input;
+    if (status === 'no-class' && user.role !== 'superadmin')
+      return { status: 403, body: { message: 'Only the admin can mark a day as "no class". Tell the admin if a class was cancelled.' } };
+    if (input.github && !GITHUB.includes(input.github))
+      return { status: 400, body: { message: 'github must be one of: ' + GITHUB.join(', ') } };
     const req = { user };
     if (!batch || !date) return { status: 400, body: { message: 'Batch and date required' } };
     if (!(await canAccessBatch(req.user, batch)))
@@ -148,16 +155,33 @@ async function upsertDailyLog(user, input) {
     const contributors = new Set((existing?.contributors || []).map(String));
     contributors.add(req.user._id.toString());
 
+    // Which planned class was this? Given → use it; else keep the saved one;
+    // else take the class planned for this date in the cycle plan.
+    let planClass = input.planClass !== undefined && input.planClass !== '' ? input.planClass : (existing?.planClass ?? null);
+    if (planClass != null) planClass = Number(planClass) || null;
+    if (planClass == null && status !== 'no-class') {
+      const cyc = await Cycle.findOne({ batch, startDate: { $lte: d }, endDate: { $gte: d } }).select('_id');
+      const cp = cyc && await CyclePlan.findOne({ cycle: cyc._id }).select('classes.number classes.date').lean();
+      const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const hit = (cp?.classes || []).find(c => c.date === ymd);
+      if (hit) planClass = hit.number;
+    }
+    const github = input.github !== undefined ? (input.github || '') : (existing?.github || '');
+    const noClass = status === 'no-class';
+
     const update = {
       batch, semester: batchDoc.semester, date: d, loggedBy: req.user._id,
+      planClass: noClass ? null : planClass, github: noClass ? '' : github,
       topicsCovered: topicsCovered || [],
       status: status || 'done',
       notes: notes || '', prepLink: prepLink || '',
-      attendance: [...merged].map(([student, present]) => ({ student, present })),
+      attendance: noClass ? [] : [...merged].map(([student, present]) => ({ student, present })),
       // Sticks once true: a later save that carries no attendance can't undo it.
-      attendanceTaken: incoming.length > 0 || !!existing?.attendanceTaken,
+      attendanceTaken: noClass ? false : (incoming.length > 0 || !!existing?.attendanceTaken),
       contributors: [...contributors],
     };
+    // First moment the log met the logging rule (never moves afterwards)
+    update.completeAt = existing?.completeAt || (isComplete(update) ? new Date() : null);
     const log = await DailyLog.findOneAndUpdate(
       { batch, date: d }, { $set: update, $setOnInsert: { firstLoggedBy: req.user._id } },
       { new: true, upsert: true, setDefaultsOnInsert: true }

@@ -99,6 +99,11 @@ const cycleSchema = new mongoose.Schema({
   assessmentHeld: { type: Boolean, default: true },
   report:    { type: reportSchema, default: () => ({}) },
   track:     { type: trackSchema, default: () => ({}) },
+  // Cycle plan lock: trainers may edit an existing plan only while the admin has
+  // opened it (e.g. during a planning meeting). Admin can always edit.
+  planOpen:   { type: Boolean, default: false },
+  planOpenBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  planOpenAt: { type: Date, default: null },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   closedAt:  { type: Date, default: null },
 }, { timestamps: true });

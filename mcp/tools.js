@@ -387,7 +387,8 @@ def({
         const taken = countsForAttendance(l);
         const present = l.attendance.filter(a => a.present).length;
         return {
-          date: ymd(l.date), status: l.status, notes: l.notes, prepLink: l.prepLink || null,
+          date: ymd(l.date), status: l.status, planClass: l.planClass ?? null, github: l.github || null,
+          notes: l.notes, prepLink: l.prepLink || null,
           topicsCovered: (l.topicsCovered || []).map(topicTitle).filter(Boolean),
           loggedBy: l.loggedBy?.name || null,
           attendanceTaken: taken,

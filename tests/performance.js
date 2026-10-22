@@ -12,6 +12,8 @@ const User = require('../models/User'), Semester = require('../models/Semester')
 const Student = require('../models/Student'), Cycle = require('../models/Cycle'), CycleMark = require('../models/CycleMark');
 const DailyLog = require('../models/DailyLog');
 const perf = require('../services/performance');
+const logRule = require('../services/logRule');
+logRule.RULE_FROM = '2099-01-01';   // older scenarios: before the logging rule; the rule has its own section
 
 let pass = 0, fail = 0;
 const ok = (n, c, x = '') => { if (c) { pass++; console.log('  PASS', n); } else { fail++; console.log('  FAIL', n, x); } };
@@ -301,6 +303,88 @@ const ymd = (d) => perf.dayYmd(d);
     await http('PATCH', `/api/performance/cycle/${off._id}`, { token: T(admin), body: { tracked: true } });
     const on = await Cycle.findById(off._id);
     ok('switching tracking on records trackedFrom', on.track.tracked && on.track.trackedFrom && Math.abs(on.track.trackedFrom - Date.now()) < 60000);
+  }
+
+  console.log('\n— cycle plan lock (trainers edit only when the admin opens it)');
+  {
+    const pb = await Batch.create({ name: 'Plan Batch', semester: sem._id, trainers: [deepu._id] });
+    const pc = await Cycle.create({ batch: pb._id, semester: sem._id, number: 1, startDate: day(-2), endDate: day(10), track: { tracked: true, trackedFrom: day(-3) } });
+    let r = await http('PUT', `/api/cycleplans/${pc._id}`, { token: T(deepu), body: { classes: [{ number: 5, title: 'Big O', date: ymd(day(1)) }] } });
+    ok('trainer may fill an empty plan', r.status === 200, JSON.stringify(r.body));
+    ok('class numbers are kept (not renumbered)', r.body.classes[0].number === 5);
+    r = await http('PUT', `/api/cycleplans/${pc._id}`, { token: T(deepu), body: { classes: [{ number: 5, title: 'Changed' }] } });
+    ok('trainer cannot change an existing plan while locked', r.status === 403 && /locked/i.test(r.body.message), JSON.stringify(r.body));
+    r = await http('PATCH', '/api/cycleplans/board/open', { token: T(deepu), body: { cycleId: pc._id, open: true } });
+    ok('trainer cannot open editing', r.status === 403);
+    r = await http('PATCH', '/api/cycleplans/board/open', { token: T(admin), body: { cycleId: pc._id, open: true } });
+    ok('admin opens editing', r.status === 200 && r.body.cycles === 1, JSON.stringify(r.body));
+    r = await http('PUT', `/api/cycleplans/${pc._id}`, { token: T(deepu), body: { classes: [{ number: 5, title: 'Big O + searching', date: ymd(day(2)) }, { number: 6, title: 'Sorting' }] } });
+    ok('trainer edits while open', r.status === 200);
+    const CyclePlan = require('../models/CyclePlan');
+    const saved = await CyclePlan.findOne({ cycle: pc._id }).lean();
+    const last = saved.changes[saved.changes.length - 1];
+    ok('change history records who and what', String(last.by) === String(deepu._id) && /added class 6/.test(last.text) && /class 5: date/.test(last.text), last.text);
+    await http('PATCH', '/api/cycleplans/board/open', { token: T(admin), body: { cycleId: pc._id, open: false } });
+    r = await http('PUT', `/api/cycleplans/${pc._id}`, { token: T(deepu), body: { classes: [] } });
+    ok('locked again after admin closes', r.status === 403);
+    r = await http('PUT', `/api/cycleplans/${pc._id}`, { token: T(admin), body: { classes: [{ number: 5, title: 'Big O', date: ymd(day(2)) }, { number: 6, title: 'Sorting', date: ymd(day(3)) }] } });
+    ok('admin can always edit', r.status === 200);
+
+    console.log('\n— plan board');
+    const pcPeriod = perf.istYmd(perf.deadlineOf(await Cycle.findById(pc._id)));
+    r = await http('GET', `/api/cycleplans/board?period=${pcPeriod}`, { token: T(deepu) });
+    const row = r.body.cycles?.find(c => String(c.cycleId) === String(pc._id));
+    ok('board lists the period with the cycle', r.status === 200 && !!row, JSON.stringify(r.body).slice(0, 300));
+    ok('board: trainer sees canEdit=false while locked', row && row.canEdit === false && row.mine === true);
+    ok('board: classes come with dates', row && row.classes.length === 2 && row.classes[0].date === ymd(day(2)));
+    r = await http('GET', `/api/cycleplans/board?period=${r.body.period}`, { token: T(admin) });
+    ok('board: admin can edit everything', r.body.isAdmin && r.body.cycles.every(c => c.canEdit));
+
+    console.log('\n— the logging rule');
+    logRule.RULE_FROM = ymd(day(-30));
+    const lb = await Batch.create({ name: 'Log Batch', semester: sem._id, trainers: [deepu._id] });
+    const st = await Student.create({ name: 'Ira', roll: '301', batch: lb._id, semester: sem._id });
+    const lc = await Cycle.create({ batch: lb._id, semester: sem._id, number: 1, startDate: day(-6), endDate: day(6), track: { tracked: true, trackedFrom: day(-7) } });
+    await http('PUT', `/api/cycleplans/${lc._id}`, { token: T(admin), body: { classes: [
+      { number: 41, title: 'Big O', date: ymd(day(-5)) }, { number: 42, title: 'Search', date: ymd(day(-4)) },
+      { number: 43, title: 'Sort', date: ymd(day(-3)) }, { number: 44, title: 'List', date: ymd(day(-2)) },
+      { number: 45, title: 'Stack', date: ymd(day(-1)) } ] } });
+    const att = [{ student: st._id, present: true }];
+    // day -5: complete, saved same day (planClass auto-filled from the plan date)
+    r = await http('POST', '/api/logs', { token: T(deepu), body: { batch: lb._id, date: ymd(day(-5)), status: 'done', github: 'all', attendance: att } });
+    ok('planClass filled from the plan date', r.status === 201 && r.body.log.planClass === 41, JSON.stringify(r.body).slice(0, 200));
+    ok('complete log gets completeAt', !!r.body.log.completeAt);
+    // day -4: saved, but no GitHub answer → incomplete
+    r = await http('POST', '/api/logs', { token: T(deepu), body: { batch: lb._id, date: ymd(day(-4)), status: 'done', attendance: att } });
+    ok('log without GitHub answer is not complete', r.body.log.completeAt === null);
+    // day -3: partial without a note → incomplete; then fixed the same moment → complete
+    r = await http('POST', '/api/logs', { token: T(deepu), body: { batch: lb._id, date: ymd(day(-3)), status: 'partial', github: 'most', attendance: att } });
+    ok('"partly" needs what was taught', r.body.log.completeAt === null);
+    r = await http('POST', '/api/logs', { token: T(deepu), body: { batch: lb._id, date: ymd(day(-3)), status: 'partial', github: 'most', notes: 'only bubble sort', attendance: att } });
+    ok('adding the note completes it', !!r.body.log.completeAt);
+    // day -2: trainer may not mark no-class; admin may
+    r = await http('POST', '/api/logs', { token: T(deepu), body: { batch: lb._id, date: ymd(day(-2)), status: 'no-class', notes: 'holiday' } });
+    ok('trainer cannot mark "no class"', r.status === 403);
+    r = await http('POST', '/api/logs', { token: T(admin), body: { batch: lb._id, date: ymd(day(-2)), status: 'no-class', notes: 'College event' } });
+    ok('admin marks "no class"', r.status === 201 && r.body.log.planClass === null && r.body.log.attendanceTaken === false);
+    // day -1: nothing logged → missing
+    // backdate createdAt/completeAt so the "same day" checks are realistic
+    for (const k of [-5, -4, -3]) await DailyLog.collection.updateOne({ batch: lb._id, date: day(k) }, { $set: { createdAt: new Date(day(k).getTime() + 12 * 3600e3) } });
+    await DailyLog.updateOne({ batch: lb._id, date: day(-5) }, { $set: { completeAt: new Date(day(-5).getTime() + 12 * 3600e3) } });
+    await DailyLog.updateOne({ batch: lb._id, date: day(-3) }, { $set: { completeAt: new Date(day(-2).getTime() + 12 * 3600e3) } });
+    const sc = await perf.scoreCycle(await Cycle.findById(lc._id));
+    const L = sc.items.logs;
+    ok('no-class day is not counted', L.days === 4 && L.noClass === 1, JSON.stringify(L));
+    ok('complete same day = on time', L.onTime === 1, JSON.stringify(L));
+    ok('completed a day later = late', L.late === 1, JSON.stringify(L));
+    ok('saved same day but incomplete = incomplete', L.incomplete === 1, JSON.stringify(L));
+    ok('nothing logged = missing', L.missing === 1, JSON.stringify(L));
+    ok('credit: (1 + .5 + .5 + 0) / 4 of 35', Math.abs(L.points - 35 * 2 / 4) < 0.01, L.points);
+    r = await http('GET', `/api/cycleplans/board?period=${perf.istYmd(perf.deadlineOf(await Cycle.findById(lc._id)))}`, { token: T(admin) });
+    const lrow = r.body.cycles.find(c => String(c.cycleId) === String(lc._id));
+    const c42 = lrow?.classes.find(c => c.number === 42);
+    ok('board shows what a log is missing', c42?.log?.missing?.includes('GitHub push'), JSON.stringify(c42));
+    logRule.RULE_FROM = '2099-01-01';
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

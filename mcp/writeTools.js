@@ -386,7 +386,12 @@ writeTools.push(writeTool({
     batch_id: z.string(),
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('YYYY-MM-DD'),
     notes: z.string().max(3000).optional().describe('What was taught, in words'),
-    status: z.enum(['done', 'partial', 'not-covered']).optional(),
+    status: z.enum(['done', 'partial', 'not-covered', 'no-class']).optional()
+      .describe('done = as planned, partial, not-covered. no-class = no class that day (holiday/cancelled) — admin only'),
+    plan_class: z.number().int().min(1).max(200).optional()
+      .describe('Class number from the cycle plan that was taught. If left out, the class planned for that date is used.'),
+    github: z.enum(['all', 'most', 'few', 'none', 'na']).optional()
+      .describe('Did students push today\'s code to GitHub? all / most / few / none / na (not needed today)'),
     topics_covered: z.array(z.string()).max(30).optional().describe('Topic titles from the batch syllabus plan'),
     prep_link: z.string().max(500).optional(),
     attendance: z.object({
@@ -445,7 +450,11 @@ writeTools.push(writeTool({
       prepLink: args.prep_link !== undefined ? args.prep_link : (existing?.prepLink || ''),
       topicsCovered: topicIds,
       attendance,
+      ...(args.plan_class !== undefined ? { planClass: args.plan_class } : {}),
+      ...(args.github !== undefined ? { github: args.github } : {}),
     };
+    if (body.status === 'no-class' && user.role !== 'superadmin')
+      throw new ToolError('Only the admin can mark a day as "no class".');
     if (existing) warnings.push(`A log already exists for ${args.date}; it will be updated (fields you didn't give are kept).`);
 
     return {
@@ -453,6 +462,8 @@ writeTools.push(writeTool({
       changes: {
         notes: body.notes || null,
         status: body.status,
+        ...(args.plan_class !== undefined ? { planClass: args.plan_class } : {}),
+        ...(args.github !== undefined ? { github: args.github } : {}),
         ...(args.topics_covered ? { topicsCovered: topicTitles } : {}),
         ...(args.prep_link !== undefined ? { prepLink: body.prepLink } : {}),
         ...(args.attendance ? {
@@ -478,7 +489,8 @@ writeTools.push(writeTool({
   description:
     'Add a new class to a cycle\'s class-by-class plan, or edit an existing one by class_number. Only the fields you pass ' +
     'are changed. Trainer is matched by name among the batch\'s assigned trainers. A new class needs a title; if ' +
-    'class_number is left out it becomes the next number.',
+    'class_number is left out it becomes the next number. Once a plan has classes, trainers can change it only while the ' +
+    'admin has opened editing for that cycle.',
   input: {
     cycle_id: z.string(),
     class_number: z.number().int().min(1).max(200).optional(),
@@ -493,6 +505,8 @@ writeTools.push(writeTool({
     await assertCanWrite(user, cycle.batch._id);
 
     const plan = await CyclePlan.findOne({ cycle: cycle._id });
+    if (user.role !== 'superadmin' && (plan?.classes || []).length && !cycle.planOpen)
+      throw new ToolError('This plan is locked. Plans can be changed only while the admin has opened editing (for example in the planning meeting). Ask the admin.');
     const classes = (plan?.classes || []).map(c => ({
       number: c.number, title: c.title, notes: c.notes, trainer: c.trainer || null, date: c.date, time: c.time,
     }));

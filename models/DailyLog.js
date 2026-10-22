@@ -13,7 +13,15 @@ const dailyLogSchema = new mongoose.Schema({
   firstLoggedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // who created it (never changes)
   // Topics touched today (references into the Plan's topics) + how it went
   topicsCovered: [{ type: mongoose.Schema.Types.ObjectId }], // topic _ids within the Plan
-  status:   { type: String, enum: ['done', 'partial', 'not-covered'], default: 'done' },
+  // done = as planned · partial = partly · not-covered = planned class not done
+  // no-class = no class that day (holiday, exam, cancelled) — admin only; the day is not scored
+  status:   { type: String, enum: ['done', 'partial', 'not-covered', 'no-class'], default: 'done' },
+  // Logging rule (from 26 Oct 2026): which planned class this was (cycle plan class number)
+  planClass: { type: Number, default: null },
+  // Did students push today's code to GitHub?  all / most / few / none / na (not needed today)
+  github:   { type: String, enum: ['', 'all', 'most', 'few', 'none', 'na'], default: '' },
+  // First time the log met the rule (plan class + status + GitHub answer [+ note if not done])
+  completeAt: { type: Date, default: null },
   // What was actually taught, in words
   notes:    { type: String, default: '' },
   // Trainer prep evidence
