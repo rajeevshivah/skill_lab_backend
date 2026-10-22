@@ -1,0 +1,10 @@
+# Installed packages: Render/Vercel install these themselves
+node_modules/
+
+# Secrets: never push
+.env
+.env.local
+
+# Build output and logs
+dist/
+npm-debug.log*

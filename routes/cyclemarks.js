@@ -171,4 +171,8 @@ router.get('/student/:studentId/history', protect, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// Shared with the MCP tools (mcp/tools.js) so the AI sees the exact same
+// attendance numbers as the Marks Sheet. Additive only — routes unchanged.
+router.__shared = { studentAttendance };
+
 module.exports = router;
