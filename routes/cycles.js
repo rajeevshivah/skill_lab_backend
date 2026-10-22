@@ -263,14 +263,23 @@ router.post('/:id/close', protect, superadminOnly, async (req, res) => {
 // PUT /api/cycles/:id/report  — trainer (of the batch) or admin saves the report
 router.put('/:id/report', protect, async (req, res) => {
   try {
-    const cycle = await Cycle.findById(req.params.id);
-    if (!cycle) return res.status(404).json({ message: 'Cycle not found' });
+    const r = await saveCycleReport(req.user, req.params.id, req.body);
+    res.status(r.status).json(r.body);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// Save logic shared by the route above and the MCP tools fill_cycle_report /
+// set_cycle_top3. Only the fields present in `input` are changed.
+async function saveCycleReport(user, cycleId, input) {
+    const req = { user, body: input || {} };
+    const cycle = await Cycle.findById(cycleId);
+    if (!cycle) return { status: 404, body: { message: 'Cycle not found' } };
     if (!(await canAccessBatch(req.user, cycle.batch)))
-      return res.status(403).json({ message: 'Not your batch' });
+      return { status: 403, body: { message: 'Not your batch' } };
     if (cycle.status === 'closed')
-      return res.status(400).json({ message: 'This cycle is closed. Ask admin to reopen it.' });
+      return { status: 400, body: { message: 'This cycle is closed. Ask admin to reopen it.' } };
     if (cycle.status !== 'report-open' && req.user.role !== 'superadmin')
-      return res.status(400).json({ message: 'The report is not open yet.' });
+      return { status: 400, body: { message: 'The report is not open yet.' } };
 
     const allowed = [
       'avgAttendance','sessionsHeld','topicsPlanned','topicsCompleted',
@@ -303,9 +312,8 @@ router.put('/:id/report', protect, async (req, res) => {
     cycle.report.submittedBy = req.user._id;
     cycle.report.submittedAt = new Date();
     await cycle.save();
-    res.json({ cycle });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
+    return { status: 200, body: { cycle } };
+}
 
 // DELETE /api/cycles/:id  (admin) — also removes the cycle's marks and class plan,
 // which used to be left behind pointing at a cycle that no longer existed.
@@ -322,5 +330,7 @@ router.delete('/:id', protect, superadminOnly, async (req, res) => {
 
 // Exported for tests — pure helpers, no database involved.
 router.__test = { labelNumber, topperBelongsToCycle };
+// Shared with the MCP write tools (mcp/writeTools.js).
+router.__shared = { saveCycleReport, computeLiveData };
 
 module.exports = router;

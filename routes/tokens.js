@@ -72,6 +72,7 @@ router.delete('/:id', protect, async (req, res) => {
 router.get('/activity', protect, async (req, res) => {
   try {
     const filter = req.user.role === 'superadmin' ? {} : { user: req.user._id };
+    if (req.query.kind === 'write') filter.kind = 'write';
     const rows = await McpAuditLog.find(filter)
       .populate('user', 'name')
       .sort('-createdAt')
@@ -79,7 +80,7 @@ router.get('/activity', protect, async (req, res) => {
     res.json({
       activity: rows.map(r => ({
         _id: r._id, at: r.createdAt, user: r.user?.name || '—', tokenName: r.tokenName,
-        tool: r.tool, args: r.args, ok: r.ok, error: r.error, durationMs: r.durationMs,
+        tool: r.tool, kind: r.kind || 'read', args: r.args, ok: r.ok, error: r.error, durationMs: r.durationMs,
       })),
     });
   } catch (err) { res.status(500).json({ message: err.message }); }

@@ -75,12 +75,21 @@ router.get('/:cycleId', protect, async (req, res) => {
 // body: { rows: [{student, status, assessment, project, category?, categoryOverridden?, remark}] }
 router.put('/:cycleId', protect, async (req, res) => {
   try {
-    const cycle = await Cycle.findById(req.params.cycleId);
-    if (!cycle) return res.status(404).json({ message: 'Cycle not found' });
-    if (!(await canAccessBatch(req.user, cycle.batch)))
-      return res.status(403).json({ message: 'Not your batch' });
+    const r = await saveCycleMarks(req.user, req.params.cycleId, req.body.rows);
+    res.status(r.status).json(r.body);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
 
-    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+// Save logic shared by the route above and the MCP tool update_cycle_marks.
+// Only the rows passed are touched; other students' marks stay as they are.
+async function saveCycleMarks(user, cycleId, inputRows) {
+    const req = { user };
+    const cycle = await Cycle.findById(cycleId);
+    if (!cycle) return { status: 404, body: { message: 'Cycle not found' } };
+    if (!(await canAccessBatch(req.user, cycle.batch)))
+      return { status: 403, body: { message: 'Not your batch' } };
+
+    const rows = Array.isArray(inputRows) ? inputRows : [];
 
     // Validate the WHOLE sheet before writing any of it. This used to be a
     // row-by-row loop, so one out-of-range mark threw halfway through and left
@@ -124,15 +133,14 @@ router.put('/:cycleId', protect, async (req, res) => {
     });
 
     if (errors.length)
-      return res.status(400).json({
+      return { status: 400, body: {
         message: `Nothing was saved — ${errors.length} row(s) need fixing.`,
         errors: errors.slice(0, 20),
-      });
+      } };
 
     if (ops.length) await CycleMark.bulkWrite(ops);
-    res.json({ saved: ops.length });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
+    return { status: 200, body: { saved: ops.length } };
+}
 
 // GET /api/marks/:cycleId/top3-suggestion  — top 3 by total marks (evaluated only)
 router.get('/:cycleId/top3-suggestion', protect, async (req, res) => {
@@ -173,6 +181,6 @@ router.get('/student/:studentId/history', protect, async (req, res) => {
 
 // Shared with the MCP tools (mcp/tools.js) so the AI sees the exact same
 // attendance numbers as the Marks Sheet. Additive only — routes unchanged.
-router.__shared = { studentAttendance };
+router.__shared = { studentAttendance, saveCycleMarks };
 
 module.exports = router;

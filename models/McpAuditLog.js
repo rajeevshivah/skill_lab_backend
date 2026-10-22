@@ -8,6 +8,8 @@ const mcpAuditLogSchema = new mongoose.Schema({
   token:      { type: mongoose.Schema.Types.ObjectId, ref: 'ApiToken', default: null },
   tokenName:  { type: String, default: '' },
   tool:       { type: String, required: true },
+  // read = looked at data; preview = proposed a change (nothing saved); write = SAVED a change
+  kind:       { type: String, enum: ['read', 'preview', 'write'], default: 'read' },
   args:       { type: String, default: '' },     // JSON of the arguments, trimmed
   ok:         { type: Boolean, default: true },
   error:      { type: String, default: '' },

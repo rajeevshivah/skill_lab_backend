@@ -115,13 +115,25 @@ router.get('/one', protect, async (req, res) => {
 // body: { batch, date, topicsCovered:[topicId], status, notes, prepLink, attendance:[{student,present}] }
 router.post('/', protect, async (req, res) => {
   try {
-    const { batch, date, topicsCovered, status, notes, prepLink, attendance } = req.body;
-    if (!batch || !date) return res.status(400).json({ message: 'Batch and date required' });
+    const r = await upsertDailyLog(req.user, req.body);
+    res.status(r.status).json(r.body);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// The actual save logic — shared by the route above and the MCP tool
+// save_daily_log, so the website and AI apps behave identically.
+// Returns { status, body } instead of writing to a response.
+async function upsertDailyLog(user, input) {
+    const { batch, date, topicsCovered, status, notes, prepLink, attendance } = input;
+    const req = { user };
+    if (!batch || !date) return { status: 400, body: { message: 'Batch and date required' } };
     if (!(await canAccessBatch(req.user, batch)))
-      return res.status(403).json({ message: 'Not your batch' });
+      return { status: 403, body: { message: 'Not your batch' } };
 
     const batchDoc = await Batch.findById(batch);
-    if (!batchDoc) return res.status(404).json({ message: 'Batch not found' });
+    if (!batchDoc) return { status: 404, body: { message: 'Batch not found' } };
 
     const d = dayKey(date);
     const existing = await DailyLog.findOne({ batch, date: d });
@@ -168,11 +180,8 @@ router.post('/', protect, async (req, res) => {
     // Recompute attendance stats for the batch's students
     await recomputeBatchStats(batch);
 
-    res.status(201).json({ log });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
+    return { status: 201, body: { log } };
+}
 
 // DELETE /api/logs/:id  (superadmin or batch trainer — not co-trainers)
 router.delete('/:id', protect, noCotrainer, async (req, res) => {
@@ -192,5 +201,7 @@ router.delete('/:id', protect, noCotrainer, async (req, res) => {
 
 // Exported for tests — pure helper, no database involved.
 router.__test = { countsForAttendance };
+// Shared with the MCP write tools (mcp/writeTools.js).
+router.__shared = { upsertDailyLog };
 
 module.exports = router;

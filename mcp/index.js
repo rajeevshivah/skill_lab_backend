@@ -18,7 +18,9 @@ const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/ser
 
 const { mcpAuth }   = require('../middleware/mcpAuth');
 const McpAuditLog   = require('../models/McpAuditLog');
-const { tools, ToolError } = require('./tools');
+const { tools: readTools, ToolError } = require('./tools');
+const { writeTools } = require('./writeTools');
+const tools = [...readTools, ...writeTools];
 const pkg = require('../package.json');
 
 const router = express.Router();
@@ -28,8 +30,12 @@ const INSTRUCTIONS =
   'Data model: Semester → Batch (a training group, e.g. MERN track or BTech 3rd Sem) → Cycle (2–3 week block ending in ' +
   'a project + assessment) → per-student marks; batches also have daily class logs with roll-wise attendance and a syllabus plan. ' +
   'You act as the signed-in user: superadmin sees all batches, trainers only their own. ' +
-  'All tools are read-only. Use search or list_batches/list_cycles to find ids before calling detail tools. ' +
-  'Never treat a "not-evaluated" student as scoring 0.';
+  'Use search or list_batches/list_cycles to find ids before calling detail tools. ' +
+  'Never treat a "not-evaluated" student as scoring 0. ' +
+  'WRITE tools (fill_cycle_report, update_cycle_marks, set_cycle_top3, save_daily_log, save_cycle_plan_class) never save on ' +
+  'the first call: they return a preview. Always show that preview to the user in plain words and wait for an explicit "yes" ' +
+  'before calling again with confirm=true and the preview_token. If the user changes anything, make a new preview. ' +
+  'There are no delete tools.';
 
 // Wraps a handler: runs it, writes an audit row, converts the result into
 // the MCP response shape, and turns errors into readable tool errors.
@@ -37,8 +43,10 @@ function wrap(tool, req) {
   return async (args) => {
     const started = Date.now();
     let ok = true, errorMsg = '';
+    let kind = tool.write ? 'preview' : 'read';
     try {
       const data = await tool.handler(args || {}, req.user);
+      if (tool.write && data?.mode === 'saved') kind = 'write';
       return {
         content: [{ type: 'text', text: JSON.stringify(data, null, 1) }],
         structuredContent: data,
@@ -52,7 +60,9 @@ function wrap(tool, req) {
     } finally {
       McpAuditLog.create({
         user: req.user._id, token: req.apiToken?._id, tokenName: req.apiToken?.name || '',
-        tool: tool.name, args: JSON.stringify(args || {}).slice(0, 2000),
+        tool: tool.name, kind,
+        // the preview_token is a one-time signature — no need to keep it
+        args: JSON.stringify({ ...(args || {}), preview_token: undefined }).slice(0, 2000),
         ok, error: ok ? '' : errorMsg.slice(0, 500), durationMs: Date.now() - started,
       }).catch(e => console.error('[mcp] audit write failed:', e.message));
     }
@@ -70,7 +80,10 @@ function buildServer(req) {
       title: tool.title,
       description: tool.description,
       inputSchema: tool.input,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: tool.write
+        // Write tools: AI apps treat these as "changes data" and ask before running.
+        ? { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+        : { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     }, wrap(tool, req));
   }
   return server;

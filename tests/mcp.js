@@ -123,8 +123,9 @@ const call = async (client, name, args = {}) => {
   const cL = await connect(LUCKY);
   const { tools } = await cL.listTools();
   const names = tools.map(t => t.name).sort();
-  ok('11 tools listed', names.length === 11, names.join(','));
-  ok('every tool is marked read-only', tools.every(t => t.annotations?.readOnlyHint === true));
+  ok('16 tools listed (11 read + 5 write)', names.length === 16, names.join(','));
+  const READ = ['whoami','search','list_batches','get_batch_roster','list_cycles','get_cycle_marks','get_cycle_plan','get_daily_logs','get_student_profile','get_today_overview','get_hall_of_fame'];
+  ok('all 11 read tools marked read-only', READ.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === true));
   ok('server instructions sent', /Skill Lab/.test(cL.getInstructions() || ''));
 
   console.log('\n4. Trainer scoping — Lucky sees MERN only');

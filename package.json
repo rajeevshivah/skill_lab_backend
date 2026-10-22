@@ -8,7 +8,8 @@
     "dev": "nodemon server.js",
     "test": "node tests/unit.js",
     "test:integration": "node tests/smoke.js",
-    "test:mcp": "node tests/mcp.js"
+    "test:mcp": "node tests/mcp.js",
+    "test:mcp-write": "node tests/mcp-write.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

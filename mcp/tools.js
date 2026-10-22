@@ -468,7 +468,8 @@ def({
         loggedToday: !!last && dayKey(last.date).getTime() === today,
         lastLogDate: last ? ymd(last.date) : null,
         planDone: done, planTotal: total, planPct: total ? Math.round((done / total) * 100) : 0,
-        nextTopic: plan ? (plan.topics.find(t => t.status !== 'done')?.title || 'plan complete') : 'no plan',
+        nextTopic: !plan ? 'no plan' : total === 0 ? 'no topics planned'
+          : (plan.topics.find(t => t.status !== 'done')?.title || 'plan complete'),
       });
     }
     return { semester: active.name, date: ymd(new Date()), batches: rows };
@@ -503,4 +504,7 @@ def({
   },
 });
 
-module.exports = { tools, ToolError };
+module.exports = {
+  tools, ToolError,
+  helpers: { requireId, assertBatchAccess, loadCycleChecked, dayKey, ymd, MARKS_RULES },
+};
