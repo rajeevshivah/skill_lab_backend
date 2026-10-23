@@ -7,6 +7,7 @@ const Semester  = require('../models/Semester');
 const { protect, canAccessBatch, superadminOnly } = require('../middleware/auth');
 const logRule = require('../services/logRule');
 const { missingParts } = logRule;
+const sv = require('../services/studentView');
 const perf = require('../services/performance');
 const router    = express.Router();
 
@@ -74,6 +75,7 @@ router.get('/board', protect, async (req, res) => {
         .select('date status planClass github notes completeAt loggedBy').populate('loggedBy', 'name').lean();
       const logBy = new Map(logs.map(l => [ymdOf(l.date), l]));
       const s = ymdOf(c.startDate), e = ymdOf(c.endDate);
+      const pulseBy = new Map((await sv.pulseSummary(c.batch._id, s, e)).map(p => [p.date, p]));
       const mine = (c.batch.trainers || []).some(t => String(t._id) === String(req.user._id));
       const hasPlan = !!(plan?.classes || []).length;
       const logView = (l) => l && ({ status: l.status, planClass: l.planClass, github: l.github, by: l.loggedBy?.name || '',
@@ -83,6 +85,11 @@ router.get('/board', protect, async (req, res) => {
         trainer: k.trainer ? { _id: k.trainer._id, name: k.trainer.name } : null,
         inCycle: !k.date || (k.date >= s && k.date <= e),
         log: k.date ? logView(logBy.get(k.date)) : null,
+        pulse: k.date && pulseBy.has(k.date) ? (() => {
+          const p = pulseBy.get(k.date), l = logBy.get(k.date);
+          // Trainer says "done as planned" but most students say it wasn't covered
+          return { ...p, mismatch: !!l && l.status === 'done' && p.responses >= 5 && p.coveredPct < 50 };
+        })() : null,
       })).sort((a, b) => a.number - b.number);
       const planned = new Set(classes.map(k => k.date).filter(Boolean));
       const extraLogs = logs.filter(l => !planned.has(ymdOf(l.date))).map(l => ({ date: ymdOf(l.date), ...logView(l) }));

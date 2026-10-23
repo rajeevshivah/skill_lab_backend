@@ -32,6 +32,9 @@ app.use('/api/cycleplans', require('./routes/cycleplans'));
 app.use('/api/search',    require('./routes/search'));
 app.use('/api/performance', require('./routes/performance'));
 app.use('/api/tokens',    require('./routes/tokens'));   // MCP tokens for AI apps
+app.use('/api/student',   require('./routes/student'));        // students: sign-in, my cycle, submit, pulse, feedback
+app.use('/api/student-admin', require('./routes/studentAdmin')); // staff: join codes, resets, submissions, pulse totals
+app.use('/api/feedback',  require('./routes/feedback'));       // trainer feedback windows + results
 
 // ── MCP endpoint (AI apps connect here — see MCP-GUIDE.md) ────────
 app.use('/mcp', require('./mcp'));

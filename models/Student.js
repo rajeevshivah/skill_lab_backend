@@ -24,6 +24,14 @@ const studentSchema = new mongoose.Schema({
     data:        { type: String, default: null },
     contentType: { type: String, default: null },
   },
+  // Student's own GitHub profile (they can edit it after signing in)
+  github:   { type: String, default: '', trim: true },
+  // Student sign-in (roll number + password). The hash is never sent to anyone.
+  login: {
+    passwordHash: { type: String, default: null, select: false },
+    activatedAt:  { type: Date, default: null },
+    lastLoginAt:  { type: Date, default: null },
+  },
   addedBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });

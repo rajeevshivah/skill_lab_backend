@@ -14,6 +14,9 @@ const batchSchema = new mongoose.Schema({
   // become "true" instead of provisional.
   rosterLocked:{ type: Boolean, default: false },
   rosterLockedAt: { type: Date, default: null },
+  // Code the trainer shows in class; a student needs it (with their roll number)
+  // to set up their sign-in the first time.
+  joinCode:    { type: String, default: null },
   createdBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 
