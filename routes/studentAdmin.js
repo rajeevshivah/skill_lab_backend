@@ -71,7 +71,7 @@ router.get('/cycle/:id/submissions', protect, async (req, res) => {
     if (!(await guard(req, res, c.batch))) return;
     const subs = await ProjectSubmission.find({ cycle: c._id }).lean();
     const w = sv.submitWindow(c);
-    res.json({ window: { ...w, custom: w.custom },
+    res.json({ window: w,
       submissions: subs.map(x => ({ _id: x._id, student: x.student, githubUrl: x.githubUrl, liveUrl: x.liveUrl, note: x.note,
         submittedAt: x.submittedAt, late: x.late, hasScreenshot: !!x.screenshot?.contentType })) });
   } catch (err) { res.status(500).json({ message: err.message }); }
@@ -88,21 +88,26 @@ router.get('/submission/:id/screenshot', protect, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// PATCH /api/student-admin/cycle/:id/window { from: 'YYYY-MM-DDTHH:mm' | '', until: … } (India time; '' = default)
-router.patch('/cycle/:id/window', protect, async (req, res) => {
+// POST /api/student-admin/cycle/:id/submission { open: true, minutes? } | { open: false }
+// The trainer's switch. Opening without minutes keeps it open until midnight (India time).
+router.post('/cycle/:id/submission', protect, async (req, res) => {
   try {
     const c = await Cycle.findById(req.params.id);
     if (!c) return res.status(404).json({ message: 'Cycle not found' });
     if (!(await guard(req, res, c.batch))) return;
-    for (const [k, f] of [['from', 'submitFrom'], ['until', 'submitUntil']]) {
-      if (req.body[k] === undefined) continue;
-      if (req.body[k] === '' || req.body[k] === null) c[f] = null;
-      else { const d = perf.istToDate(req.body[k]); if (!d) return res.status(400).json({ message: `Bad ${k} time` }); c[f] = d; }
+    const now = new Date();
+    if (req.body.open) {
+      const mins = Number(req.body.minutes);
+      const midnight = perf.istToDate(`${sv.todayIST()}T23:59`);
+      c.submitFrom = now;
+      c.submitUntil = mins > 0 ? new Date(Math.min(now.getTime() + mins * 60000, midnight.getTime())) : midnight;
+    } else {
+      if (!c.submitFrom) return res.json({ ok: true, window: sv.submitWindow(c) });
+      c.submitUntil = now;
     }
-    const w = sv.submitWindow(c);
-    if (w.until <= w.from) return res.status(400).json({ message: 'The window must end after it opens.' });
+    c.submitBy = req.user._id;
     await c.save();
-    res.json({ ok: true, window: w });
+    res.json({ ok: true, window: sv.submitWindow(c) });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 

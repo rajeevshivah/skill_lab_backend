@@ -8,19 +8,18 @@ const ProjectSubmission = require('../models/ProjectSubmission');
 const ClassPulse = require('../models/ClassPulse');
 const { FeedbackWindow, Feedback, QUESTIONS } = require('../models/Feedback');
 const perf = require('./performance');
+const Holiday = require('../models/Holiday');
 
 const IST = 330 * 60 * 1000;
 const todayIST = () => perf.istYmd(new Date());
 const fmtIST = (d) => new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 
-// Project submission window. Default: the whole project day (India time).
-// Late submissions are still accepted (and marked late) until the cycle deadline.
-function submitWindow(cycle) {
+// Project submission switch. Closed unless a trainer has opened it and it has
+// not yet closed (closing time defaults to midnight of the day it was opened).
+function submitWindow(cycle, now = new Date()) {
   const pd = perf.dayYmd(cycle.track?.projectDate || cycle.endDate);
-  const from = cycle.submitFrom || perf.istToDate(`${pd}T00:00`);
-  const until = cycle.submitUntil || perf.istToDate(`${pd}T23:59`);
-  const dl = perf.deadlineOf(cycle);
-  return { projectDay: pd, from, until, lateUntil: dl > until ? dl : until, custom: !!(cycle.submitFrom || cycle.submitUntil) };
+  const from = cycle.submitFrom || null, until = cycle.submitUntil || null;
+  return { projectDay: pd, from, until, open: !!(from && until && now >= from && now <= until) };
 }
 
 // The cycle a batch is in today; else the next one; else the latest.
@@ -33,7 +32,17 @@ async function currentCycle(batchId) {
 }
 
 // The planned class of a batch on a given day (from the cycle plan), or null.
+async function holidayOn(batchId, ymd) {
+  const h = await Holiday.findOne({ $or: [{ batches: { $size: 0 } }, { batches: batchId }], from: { $lte: ymd }, to: { $gte: ymd } }).select('title').lean();
+  return h ? h.title : null;
+}
+async function holidaysBetween(batchId, from, to) {
+  const hs = await Holiday.find({ $or: [{ batches: { $size: 0 } }, { batches: batchId }], from: { $lte: to }, to: { $gte: from } }).select('from to title').lean();
+  return (d) => hs.find(h => d >= h.from && d <= h.to)?.title || null;
+}
+
 async function classOn(batchId, ymd) {
+  if (await holidayOn(batchId, ymd)) return null;
   const cycles = await Cycle.find({ batch: batchId }).select('_id startDate endDate').lean();
   const c = cycles.find(x => perf.dayYmd(x.startDate) <= ymd && perf.dayYmd(x.endDate) >= ymd);
   if (!c) return null;
@@ -60,9 +69,10 @@ async function studentHome(s) {
     const start = perf.dayYmd(cycle.startDate), end = perf.dayYmd(cycle.endDate);
     const myPulse = await ClassPulse.find({ student: s._id, date: { $gte: start, $lte: end } }).lean();
     const pulseBy = new Map(myPulse.map(p => [p.date, p]));
+    const holTitle = await holidaysBetween(s.batch, start, end);
     const classes = (plan?.classes || []).filter(k => !k.date || (k.date >= start && k.date <= end))
       .sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999') || a.number - b.number)
-      .map(k => ({ number: k.number, title: k.title, date: k.date || null,
+      .map(k => ({ number: k.number, title: k.title, date: k.date || null, holiday: k.date ? holTitle(k.date) : null,
         when: !k.date ? 'unscheduled' : k.date < today ? 'past' : k.date === today ? 'today' : 'upcoming',
         myPulse: k.date && pulseBy.has(k.date) ? { covered: pulseBy.get(k.date).covered, understanding: pulseBy.get(k.date).understanding } : null }));
     cycleView = { id: cycle._id, number: cycle.number, start, end, classes };
@@ -70,12 +80,13 @@ async function studentHome(s) {
     const w = submitWindow(cycle);
     const sub = await ProjectSubmission.findOne({ cycle: cycle._id, student: s._id }).lean();
     project = {
-      projectDay: w.projectDay, from: w.from, until: w.until, lateUntil: w.lateUntil,
-      state: now < w.from ? 'not-yet' : now <= w.until ? 'open' : now <= w.lateUntil ? 'late' : 'closed',
+      projectDay: w.projectDay, openedAt: w.from, closesAt: w.until,
+      state: w.open ? 'open' : 'closed',
       submission: sub ? { githubUrl: sub.githubUrl, liveUrl: sub.liveUrl, note: sub.note, submittedAt: sub.submittedAt, late: sub.late, hasScreenshot: !!sub.screenshot?.contentType } : null,
     };
   }
 
+  const holidayToday = await holidayOn(s.batch, today);
   const todayClass = await classOn(s.batch, today);
   let pulseToday = null;
   if (todayClass) {
@@ -108,7 +119,7 @@ async function studentHome(s) {
     today,
     attendance: { present: s.stats?.presentCount || 0, total: s.stats?.totalSessions || 0,
       pct: s.stats?.totalSessions ? Math.round(100 * s.stats.presentCount / s.stats.totalSessions) : null },
-    cycle: cycleView, project, pulseToday, marks: history, feedback,
+    cycle: cycleView, project, pulseToday, holidayToday, marks: history, feedback,
     questions: QUESTIONS.map(([key, text]) => ({ key, text })),
   };
 }
@@ -130,4 +141,4 @@ async function pulseSummary(batchId, from, to) {
   }));
 }
 
-module.exports = { todayIST, fmtIST, submitWindow, currentCycle, classOn, ratableTrainers, studentHome, pulseSummary, IST };
+module.exports = { holidayOn, holidaysBetween, todayIST, fmtIST, submitWindow, currentCycle, classOn, ratableTrainers, studentHome, pulseSummary, IST };

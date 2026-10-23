@@ -17,6 +17,10 @@ const batchSchema = new mongoose.Schema({
   // Code the trainer shows in class; a student needs it (with their roll number)
   // to set up their sign-in the first time.
   joinCode:    { type: String, default: null },
+  // Weekly timetable: the weekdays this batch has class (0 Sun … 6 Sat).
+  // Used to move classes to the next class day when a holiday is marked.
+  // Empty = not set yet (the Settings page shows a guess from the class plans).
+  schedule:    { days: { type: [Number], default: [] } },
   createdBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 

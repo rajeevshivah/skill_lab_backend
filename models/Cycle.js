@@ -101,9 +101,11 @@ const cycleSchema = new mongoose.Schema({
   track:     { type: trackSchema, default: () => ({}) },
   // Cycle plan lock: trainers may edit an existing plan only while the admin has
   // opened it (e.g. during a planning meeting). Admin can always edit.
-  // Project submission window for students (default: the whole project day, India time)
-  submitFrom:  { type: Date, default: null },
-  submitUntil: { type: Date, default: null },
+  // Project submission switch for students — the trainer opens it in the project
+  // class and closes it (it also closes itself at midnight). Closed by default.
+  submitFrom:  { type: Date, default: null },     // when it was last opened
+  submitUntil: { type: Date, default: null },     // when it closes / closed
+  submitBy:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   planOpen:   { type: Boolean, default: false },
   planOpenBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   planOpenAt: { type: Date, default: null },

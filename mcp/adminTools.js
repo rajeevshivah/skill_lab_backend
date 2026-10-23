@@ -420,7 +420,8 @@ admin(writeTool({
   title: 'Add many classes to a cycle plan',
   description:
     'Superadmin only. Add or update several classes of ONE cycle\'s class-by-class plan in one go (matched by class number; ' +
-    'classes not listed are kept). Use for back-filling a whole cycle. For one class use save_cycle_plan_class.',
+    'classes not listed are kept). remove_numbers deletes those classes from the plan. Use for back-filling or re-planning a ' +
+    'whole cycle. For one class use save_cycle_plan_class.',
   input: {
     cycle_id: z.string(),
     classes: z.array(z.object({
@@ -429,7 +430,8 @@ admin(writeTool({
       notes: z.string().max(2000).optional(),
       date: isoDate.optional(),
       time: z.string().max(20).optional(),
-    })).min(1).max(60),
+    })).max(60).default([]),
+    remove_numbers: z.array(z.number().int().min(1).max(200)).max(60).optional().describe('Class numbers to delete from the plan'),
   },
   async plan(args, me) {
     requireId(args.cycle_id, 'cycle');
@@ -439,9 +441,15 @@ admin(writeTool({
     if (new Set(nums).size !== nums.length) throw new ToolError('Each class number may appear only once.');
     const existing = await CyclePlanModel.findOne({ cycle: c._id }).lean();
     const byNum = new Map((existing?.classes || []).map(k => [k.number, k]));
-    const changes = args.classes.map(x => ({ number: x.number, date: x.date || '', title: x.title, action: byNum.has(x.number) ? 'update' : 'add' }));
+    const remove = [...new Set(args.remove_numbers || [])];
+    if (!args.classes.length && !remove.length) throw new ToolError('Give classes to add/update or remove_numbers to delete.');
+    if (remove.some(n => nums.includes(n))) throw new ToolError('A class number cannot be both updated and removed.');
+    const missing = remove.filter(n => !byNum.has(n));
+    if (missing.length) throw new ToolError(`Not in the plan: class ${missing.join(', ')}`);
+    const changes = [...args.classes.map(x => ({ number: x.number, date: x.date || '', title: x.title, action: byNum.has(x.number) ? 'update' : 'add' })),
+      ...remove.map(n => ({ number: n, date: byNum.get(n).date || '', title: byNum.get(n).title, action: 'remove' }))];
     return {
-      summary: `Cycle ${c.number} plan — ${c.batch.name}: ${changes.filter(x => x.action === 'add').length} new, ${changes.filter(x => x.action === 'update').length} updated`,
+      summary: `Cycle ${c.number} plan — ${c.batch.name}: ${changes.filter(x => x.action === 'add').length} new, ${changes.filter(x => x.action === 'update').length} updated${remove.length ? `, ${remove.length} removed` : ''}`,
       changes,
       apply: async () => {
         const merged = new Map((existing?.classes || []).map(k => [k.number, {
@@ -451,6 +459,7 @@ admin(writeTool({
           merged.set(x.number, { ...old, number: x.number, title: x.title,
             notes: x.notes ?? old.notes, date: x.date ?? old.date, time: x.time ?? old.time });
         }
+        for (const n of remove) merged.delete(n);
         const list = [...merged.values()].sort((a, b) => a.number - b.number);
         const r = await saveCyclePlan(me, c._id, list);
         if (r.status !== 200) throw new ToolError(r.body?.message || 'Could not save the plan.');

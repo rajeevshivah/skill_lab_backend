@@ -76,6 +76,7 @@ router.get('/board', protect, async (req, res) => {
       const logBy = new Map(logs.map(l => [ymdOf(l.date), l]));
       const s = ymdOf(c.startDate), e = ymdOf(c.endDate);
       const pulseBy = new Map((await sv.pulseSummary(c.batch._id, s, e)).map(p => [p.date, p]));
+      const holTitle = await sv.holidaysBetween(c.batch._id, s, e);
       const mine = (c.batch.trainers || []).some(t => String(t._id) === String(req.user._id));
       const hasPlan = !!(plan?.classes || []).length;
       const logView = (l) => l && ({ status: l.status, planClass: l.planClass, github: l.github, by: l.loggedBy?.name || '',
@@ -84,6 +85,7 @@ router.get('/board', protect, async (req, res) => {
         number: k.number, title: k.title, notes: k.notes, date: k.date, time: k.time,
         trainer: k.trainer ? { _id: k.trainer._id, name: k.trainer.name } : null,
         inCycle: !k.date || (k.date >= s && k.date <= e),
+        holiday: k.date ? holTitle(k.date) : null,
         log: k.date ? logView(logBy.get(k.date)) : null,
         pulse: k.date && pulseBy.has(k.date) ? (() => {
           const p = pulseBy.get(k.date), l = logBy.get(k.date);
@@ -104,9 +106,13 @@ router.get('/board', protect, async (req, res) => {
       });
     }
     out.sort((a, b) => a.batch.name.localeCompare(b.batch.name));
+    const Holiday = require('../models/Holiday');
+    const pS = ymdOf(pick.start), pE = ymdOf(pick.end);
+    const hols = await Holiday.find({ semester: semester._id, from: { $lte: pE }, to: { $gte: pS } }).populate('batches', 'name').lean();
     res.json({
       periods: periods.map(p => ({ key: p.key, numbers: [...p.numbers].sort((a, b) => a - b), batches: p.batches, start: ymdOf(p.start), end: ymdOf(p.end) })),
       period: pick.key, start: ymdOf(pick.start), end: ymdOf(pick.end), isAdmin, ruleFrom: logRule.RULE_FROM, cycles: out,
+      holidays: hols.map(h => ({ from: h.from, to: h.to, title: h.title, batches: (h.batches || []).map(b => b.name) })),
     });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });

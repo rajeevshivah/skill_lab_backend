@@ -33,6 +33,7 @@ const Student   = require('../models/Student');
 const CycleMark = require('../models/CycleMark');
 const CyclePlan = require('../models/CyclePlan');
 const DailyLog  = require('../models/DailyLog');
+const Holiday   = require('../models/Holiday');
 const logRule = require('./logRule');   // logRule.RULE_FROM read at call time (tests override it)
 const { isComplete } = logRule;
 
@@ -166,9 +167,14 @@ async function scoreCycle(cycle, now = new Date()) {
   const byDay = new Map(logs.map(l => [dayYmd(l.date), l]));
   const days = new Set([...byDay.keys()]);
   for (const c of plan?.classes || []) if (c.date && c.date >= startYmd && c.date <= lastDay) days.add(c.date);
+  // Holidays (Settings → Holidays) are never class days for anyone
+  const hols = await Holiday.find({ semester: cycle.semester, $or: [{ batches: { $size: 0 } }, { batches: cycle.batch }],
+    from: { $lte: dayYmd(cycle.endDate) }, to: { $gte: startYmd } }).select('from to').lean();
+  const isHol = (d) => hols.some(h => d >= h.from && d <= h.to);
   const logDays = [], noClassDays = [];
   for (const d of [...days].sort()) {
     if (d > lastDay || (fromYmd && d < fromYmd)) continue;
+    if (isHol(d)) { noClassDays.push(d); continue; }
     const l = byDay.get(d);
     const planned = plannedBy.has(d) && isEligible(plannedBy.get(d)) ? plannedBy.get(d) : null;
     if (!l) { if (d === today) continue; logDays.push({ date: d, state: 'missing', resp: planned || '*' }); continue; }

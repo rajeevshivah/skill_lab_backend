@@ -35,6 +35,7 @@ app.use('/api/tokens',    require('./routes/tokens'));   // MCP tokens for AI ap
 app.use('/api/student',   require('./routes/student'));        // students: sign-in, my cycle, submit, pulse, feedback
 app.use('/api/student-admin', require('./routes/studentAdmin')); // staff: join codes, resets, submissions, pulse totals
 app.use('/api/feedback',  require('./routes/feedback'));       // trainer feedback windows + results
+app.use('/api/settings',  require('./routes/settings'));       // admin: batch timetables + holidays
 
 // ── MCP endpoint (AI apps connect here — see MCP-GUIDE.md) ────────
 app.use('/mcp', require('./mcp'));

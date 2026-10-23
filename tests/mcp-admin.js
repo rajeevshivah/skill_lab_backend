@@ -169,6 +169,9 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
     const cpDoc = await CyclePlan.findOne({ cycle: daCycle._id }).lean();
     ok('bulk plan merges by number (keeps class 1, updates 2, keeps its date)', pb2.saved.data?.totalClasses === 3
       && cpDoc.classes.find(k => k.number === 2).title === 'Pandas basics' && cpDoc.classes.find(k => k.number === 2).date === '2026-10-02');
+    const pb3 = await yes(cA, 'save_cycle_plan_bulk', { cycle_id: String(daCycle._id), classes: [{ number: 2, title: 'Pandas + charts' }], remove_numbers: [3] });
+    ok('bulk plan can remove classes', pb3.preview.data?.changes?.some(x => x.action === 'remove' && x.number === 3) && pb3.saved.data?.totalClasses === 2, pb3.preview.text);
+    ok('removing a class not in the plan is refused', (await call(cA, 'save_cycle_plan_bulk', { cycle_id: String(daCycle._id), remove_numbers: [77] })).isError);
     ok('bulk plan refused for trainer', (await call(cT, 'save_cycle_plan_bulk', { cycle_id: String(daCycle._id), classes: [{ number: 9, title: 'x' }] })).isError);
 
     await DailyLog.create({ batch: mern._id, semester: sem._id, date: new Date('2026-10-05T00:00:00'), notes: 'trainer wrote this', loggedBy: saif._id,

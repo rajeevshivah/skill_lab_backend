@@ -134,12 +134,11 @@ router.post('/submission', protectStudent, async (req, res) => {
     const cycle = await Cycle.findById(b.cycleId);
     if (!cycle || String(cycle.batch) !== String(s.batch)) return res.status(404).json({ message: 'Cycle not found' });
     const w = sv.submitWindow(cycle), now = new Date();
-    if (now < w.from) return res.status(400).json({ message: `Submission opens ${sv.fmtIST(w.from)}.` });
-    if (now > w.lateUntil) return res.status(400).json({ message: 'Submission is closed. Talk to your trainer.' });
+    if (!w.open) return res.status(400).json({ message: 'Submission is closed. Your trainer opens it in class on project day.' });
     const gh = String(b.githubUrl || '').trim(), live = String(b.liveUrl || '').trim();
     if (!/^https?:\/\/(www\.)?github\.com\/.+/.test(gh)) return res.status(400).json({ message: 'Give the GitHub link of your project repository (https://github.com/…).' });
     if (live && !/^https?:\/\/.+/.test(live)) return res.status(400).json({ message: 'The live link must start with https://' });
-    const set = { batch: s.batch, githubUrl: gh, liveUrl: live, note: String(b.note || '').slice(0, 500), submittedAt: now, late: now > w.until };
+    const set = { batch: s.batch, githubUrl: gh, liveUrl: live, note: String(b.note || '').slice(0, 500), submittedAt: now, late: sv.todayIST() > w.projectDay };
     if (b.screenshot?.data) {
       if (!/^image\/(png|jpe?g|webp)$/.test(b.screenshot.contentType || '')) return res.status(400).json({ message: 'Screenshot must be PNG, JPG or WEBP.' });
       if (String(b.screenshot.data).length > 2_000_000) return res.status(400).json({ message: 'Screenshot is too large (max ~1.5 MB).' });
