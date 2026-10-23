@@ -25,6 +25,7 @@ const { canAccessBatch } = require('../middleware/auth');
 const { saveCycleReport }  = require('../routes/cycles').__shared;
 const { saveCycleMarks, setAssessmentHeld } = require('../routes/cyclemarks').__shared;
 const { upsertDailyLog }   = require('../routes/logs').__shared;
+const planStore = require('../services/planStore');
 const { saveCyclePlan }    = require('../routes/cycleplans').__shared;
 const { ToolError, helpers } = require('./tools');
 const { requireId, loadCycleChecked, dayKey, ymd, MARKS_RULES } = helpers;
@@ -505,8 +506,8 @@ writeTools.push(writeTool({
     await assertCanWrite(user, cycle.batch._id);
 
     const plan = await CyclePlan.findOne({ cycle: cycle._id });
-    if (user.role !== 'superadmin' && (plan?.classes || []).length && !cycle.planOpen)
-      throw new ToolError('This plan is locked. Plans can be changed only while the admin has opened editing (for example in the planning meeting). Ask the admin.');
+    const right = await planStore.editRight(user, cycle, plan?.classes || []);
+    if (!right.ok) throw new ToolError(right.message);
     const classes = (plan?.classes || []).map(c => ({
       number: c.number, title: c.title, notes: c.notes, trainer: c.trainer || null, date: c.date, time: c.time,
     }));

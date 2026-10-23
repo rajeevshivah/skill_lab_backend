@@ -21,8 +21,9 @@ const McpAuditLog   = require('../models/McpAuditLog');
 const { tools: readTools, ToolError } = require('./tools');
 const { writeTools } = require('./writeTools');
 const { adminTools } = require('./adminTools');
+const { opsTools }   = require('./opsTools');
 const jwt = require('jsonwebtoken');
-const tools = [...readTools, ...writeTools, ...adminTools];
+const tools = [...readTools, ...writeTools, ...adminTools, ...opsTools];
 
 // Lets a tool call an EXISTING website route inside this server, as the
 // current user — so admin tools reuse every website rule unchanged.
@@ -58,6 +59,9 @@ const INSTRUCTIONS =
   'There are no delete tools. To "remove" something use the reversible tools: update_user active=false (deactivate a login), ' +
   'update_batch remove_trainers / active=false, update_semester status=archived. ' +
   'Admin tools (users, semesters, batches, cycles, moving students) appear only for superadmin. ' +
+  'Cycles are created ONLY with plan_cycles (groups of batches, dates, project days, holidays → dated empty plan rows). ' +
+  'Meetings: get_meeting_day (daily review), get_cycle_review (end-of-cycle, per trainer), add_meeting_note / update_meeting_note. ' +
+  'Holidays: add_holiday (shift or mark) / undo_holiday; timetables: get_timetables / set_timetable. ' +
   'When create_user or update_user returns a temporaryPassword, show it to the user once and remind them to share it privately.';
 
 // Wraps a handler: runs it, writes an audit row, converts the result into

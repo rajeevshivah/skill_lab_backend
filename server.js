@@ -36,6 +36,7 @@ app.use('/api/student',   require('./routes/student'));        // students: sign
 app.use('/api/student-admin', require('./routes/studentAdmin')); // staff: join codes, resets, submissions, pulse totals
 app.use('/api/feedback',  require('./routes/feedback'));       // trainer feedback windows + results
 app.use('/api/settings',  require('./routes/settings'));       // admin: batch timetables + holidays
+app.use('/api/meeting',   require('./routes/meeting'));        // meeting screens: daily review, cycle review, notes
 
 // ── MCP endpoint (AI apps connect here — see MCP-GUIDE.md) ────────
 app.use('/mcp', require('./mcp'));

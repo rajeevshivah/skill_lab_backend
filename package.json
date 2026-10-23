@@ -11,7 +11,12 @@
     "test:mcp": "node tests/mcp.js",
     "test:mcp-write": "node tests/mcp-write.js",
     "test:mcp-admin": "node tests/mcp-admin.js",
-    "test:performance": "node tests/performance.js"
+    "test:performance": "node tests/performance.js",
+    "test:students": "node tests/students.js",
+    "test:calendar": "node tests/calendar.js",
+    "test:plans": "node tests/plans.js",
+    "test:planner": "node tests/planner.js",
+    "test:meeting": "node tests/meeting.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

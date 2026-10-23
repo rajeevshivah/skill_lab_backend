@@ -69,16 +69,10 @@ const ymd = (d) => perf.dayYmd(d);
   console.log('\n— new cycles are tracked, old ones are not');
   const old = await Cycle.create({ batch: mern._id, semester: sem._id, number: 3, startDate: day(-40), endDate: day(-30) });
   ok('existing cycle defaults to untracked', old.track.tracked === false);
-  const created = await http('POST', '/api/cycles', { token: T(admin), body: { batch: mern._id, number: 4, startDate: ymd(day(-10)), endDate: ymd(day(-3)) } });
-  ok('cycle created via website is tracked', created.status === 201 && created.body.cycle.track.tracked === true, JSON.stringify(created.body).slice(0, 200));
-  ok('new cycle records when tracking began', !!created.body.cycle.track.trackedFrom);
-  // the scenarios below pretend tracking began at the start of the cycle
-  await Cycle.updateOne({ _id: created.body.cycle._id }, { $set: { 'track.trackedFrom': day(-11) } });
-  const c4 = await Cycle.findById(created.body.cycle._id);
-  const bulk = await http('POST', '/api/cycles/bulk', { token: T(admin), body: { batches: [bca._id], startDate: ymd(day(-10)), endDate: ymd(day(-3)) } });
-  await Cycle.updateOne({ _id: bulk.body.created[0].cycleId }, { $set: { number: 4, 'track.trackedFrom': day(-11) } }); // same round as Full Stack
-  const b4 = await Cycle.findById(bulk.body.created[0].cycleId);
-  ok('bulk-created cycle is tracked', b4.track.tracked === true);
+  // (Creating cycles — tracked from creation — is tested in tests/planner.js.)
+  // The scenarios below pretend tracking began at the start of the cycle.
+  const c4 = await Cycle.create({ batch: mern._id, semester: sem._id, number: 4, startDate: day(-10), endDate: day(-3), track: { tracked: true, trackedFrom: day(-11) } });
+  const b4 = await Cycle.create({ batch: bca._id, semester: sem._id, number: 4, startDate: day(-10), endDate: day(-3), track: { tracked: true, trackedFrom: day(-11) } });
 
   console.log('\n— stamps: who did it, admin or trainer');
   // Samant plans late (cycle already started), Deepu's plan is filled by admin
@@ -291,8 +285,7 @@ const ymd = (d) => perf.dayYmd(d);
   console.log('\n— tracking counts only from the day it began');
   {
     const solo = await Batch.create({ name: 'Solo Batch', semester: sem._id, trainers: [deepu._id] });
-    const late = await http('POST', '/api/cycles', { token: T(admin), body: { batch: solo._id, number: 9, startDate: ymd(day(-6)), endDate: ymd(day(5)) } });
-    const lc = await Cycle.findById(late.body.cycle._id);
+    const lc = await Cycle.create({ batch: solo._id, semester: sem._id, number: 9, startDate: day(-6), endDate: day(5), track: { tracked: true, trackedFrom: new Date() } });
     await DailyLog.create({ batch: solo._id, semester: sem._id, date: day(-5), notes: 'backfilled by admin', loggedBy: admin._id, firstLoggedBy: admin._id });
     let sc = await perf.scoreCycle(lc);
     ok('class days before tracking began are ignored', sc.items.logs.state === 'pending' && sc.items.logs.days === 0, JSON.stringify(sc.items.logs));

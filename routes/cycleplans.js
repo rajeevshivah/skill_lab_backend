@@ -11,26 +11,7 @@ const sv = require('../services/studentView');
 const perf = require('../services/performance');
 const router    = express.Router();
 
-// Short human description of what changed between two class lists (by class number).
-function describeChanges(oldList, newList) {
-  const key = (c) => String(c.number);
-  const o = new Map(oldList.map(c => [key(c), c])), n = new Map(newList.map(c => [key(c), c]));
-  const parts = [];
-  const added = [...n.keys()].filter(k => !o.has(k)), removed = [...o.keys()].filter(k => !n.has(k));
-  if (added.length) parts.push(`added class ${added.join(', ')}`);
-  if (removed.length) parts.push(`removed class ${removed.join(', ')}`);
-  for (const [k, c] of n) {
-    const p = o.get(k); if (!p) continue;
-    const f = [];
-    if ((p.date || '') !== (c.date || '')) f.push(`date ${p.date || '—'} → ${c.date || '—'}`);
-    if ((p.title || '') !== (c.title || '')) f.push('topic');
-    if ((p.notes || '') !== (c.notes || '')) f.push('details');
-    if ((p.time || '') !== (c.time || '')) f.push('time');
-    if (String(p.trainer || '') !== String(c.trainer || '')) f.push('trainer');
-    if (f.length) parts.push(`class ${k}: ${f.join(', ')}`);
-  }
-  return parts.join('; ').slice(0, 400);
-}
+const store = require('../services/planStore');
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const ymdOf = (d) => { const x = new Date(d); return `${x.getFullYear()}-${pad2(x.getMonth() + 1)}-${pad2(x.getDate())}`; };
@@ -70,7 +51,7 @@ router.get('/board', protect, async (req, res) => {
     const isAdmin = req.user.role === 'superadmin';
     const out = [];
     for (const c of cycles) {
-      const plan = await CyclePlan.findOne({ cycle: c._id }).populate('classes.trainer', 'name').populate('changes.by', 'name').lean();
+      const plan = await CyclePlan.findOne({ cycle: c._id }).populate('classes.trainer', 'name').populate('classes.updatedBy', 'name').populate('changes.by', 'name').lean();
       const logs = await DailyLog.find({ batch: c.batch._id, date: { $gte: c.startDate, $lte: c.endDate } })
         .select('date status planClass github notes completeAt loggedBy').populate('loggedBy', 'name').lean();
       const logBy = new Map(logs.map(l => [ymdOf(l.date), l]));
@@ -78,12 +59,13 @@ router.get('/board', protect, async (req, res) => {
       const pulseBy = new Map((await sv.pulseSummary(c.batch._id, s, e)).map(p => [p.date, p]));
       const holTitle = await sv.holidaysBetween(c.batch._id, s, e);
       const mine = (c.batch.trainers || []).some(t => String(t._id) === String(req.user._id));
-      const hasPlan = !!(plan?.classes || []).length;
+      const complete = store.isComplete(plan?.classes);
       const logView = (l) => l && ({ status: l.status, planClass: l.planClass, github: l.github, by: l.loggedBy?.name || '',
         missing: ymdOf(l.date) >= logRule.RULE_FROM ? missingParts(l) : [] });
       const classes = (plan?.classes || []).map(k => ({
         number: k.number, title: k.title, notes: k.notes, date: k.date, time: k.time,
         trainer: k.trainer ? { _id: k.trainer._id, name: k.trainer.name } : null,
+        updatedAt: k.updatedAt || null, updatedBy: k.updatedBy?.name || '', updatedById: k.updatedBy?._id || null,
         inCycle: !k.date || (k.date >= s && k.date <= e),
         holiday: k.date ? holTitle(k.date) : null,
         log: k.date ? logView(logBy.get(k.date)) : null,
@@ -100,7 +82,7 @@ router.get('/board', protect, async (req, res) => {
         batch: { _id: c.batch._id, name: c.batch.name, track: c.batch.track },
         trainers: (c.batch.trainers || []).filter(t => t.isActive !== false).map(t => ({ _id: t._id, name: t.name })),
         planOpen: !!c.planOpen, planOpenBy: c.planOpenBy?.name || '', planOpenAt: c.planOpenAt,
-        canEdit: isAdmin || (mine && (c.planOpen || !hasPlan)), mine,
+        canEdit: isAdmin || (mine && (c.planOpen || !complete)), mine, complete, version: plan ? plan.__v : null,
         classes, extraLogs,
         changes: (plan?.changes || []).slice(-8).reverse().map(x => ({ at: x.at, by: x.by?.name || '', text: x.text })),
       });
@@ -152,59 +134,47 @@ router.get('/:cycleId', protect, async (req, res) => {
                startDate: cycle.startDate, endDate: cycle.endDate },
       trainers: cycle.batch.trainers || [],
       classes: plan.classes || [],
+      version: plan.__v ?? null,
       planOpen: !!cycle.planOpen,
-      canEdit: req.user.role === 'superadmin' || ((cycle.batch.trainers || []).some(t => String(t._id) === String(req.user._id))
-        && (cycle.planOpen || !(plan.classes || []).length)),
+      complete: store.isComplete(plan.classes),
+      canEdit: (await store.editRight(req.user, cycle, plan.classes || [])).ok,
     });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// PUT /api/cycleplans/:cycleId  — save the whole class list
-// body: { classes: [{number,title,notes,trainer,date,time}] }
+// PUT /api/cycleplans/:cycleId — save the whole class list.
+// body: { classes: [{number,title,notes,trainer,date,time}], version? } (version = the plan version you loaded)
 router.put('/:cycleId', protect, async (req, res) => {
   try {
-    const r = await saveCyclePlan(req.user, req.params.cycleId, req.body.classes);
+    const r = await store.saveCyclePlan(req.user, req.params.cycleId, req.body.classes, { baseVersion: req.body.version });
     res.status(r.status).json(r.body);
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// Save logic shared by the route above and the MCP tool save_cycle_plan_class.
-// Replaces the whole class list with `inputClasses`.
-async function saveCyclePlan(user, cycleId, inputClasses) {
-    const req = { user };
-    const cycle = await Cycle.findById(cycleId);
-    if (!cycle) return { status: 404, body: { message: 'Cycle not found' } };
-    if (!(await canAccessBatch(req.user, cycle.batch)))
-      return { status: 403, body: { message: 'Not your batch' } };
-    const before = await CyclePlan.findOne({ cycle: cycle._id }).lean();
-    const hadPlan = !!(before?.classes || []).length;
-    // Trainers fill an empty plan freely; once a plan exists, only while the admin has opened editing.
-    if (req.user.role !== 'superadmin' && hadPlan && !cycle.planOpen)
-      return { status: 403, body: { message: 'This plan is locked. Plans can be changed only while the admin has opened editing (for example in the planning meeting). Ask the admin.' } };
-
-    const incoming = Array.isArray(inputClasses) ? inputClasses : [];
-    const classes = incoming.map((c, i) => ({
-      number: c.number || i + 1,
-      title:  (c.title || '').trim(),
-      notes:  (c.notes || '').trim(),
-      trainer: c.trainer || null,
-      date:   c.date || '',
-      time:   c.time || '',
-    }));
-
-    const text = describeChanges(before?.classes || [], classes);
-    const changes = [...(before?.changes || [])];
-    if (text) changes.push({ at: new Date(), by: req.user._id, text });
-    const plan = await CyclePlan.findOneAndUpdate(
-      { cycle: cycle._id },
-      { cycle: cycle._id, batch: cycle.batch, semester: cycle.semester, classes, updatedBy: req.user._id,
-        changes: changes.slice(-60) },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    ).populate('classes.trainer', 'name');
-
-    if (classes.length) { await perf.stamp(cycle, 'plan', req.user); await cycle.save(); }
-    return { status: 200, body: { classes: plan.classes } };
-}
+// One class at a time (Class plans board). Each sends the row's updatedAt it loaded;
+// if someone changed that row since → 409 with the current row.
+// POST   /api/cycleplans/:cycleId/class            { number, title, notes, date, time, trainer }  — add
+// PATCH  /api/cycleplans/:cycleId/class/:number    { …fields, baseUpdatedAt }                     — edit (number may change)
+// DELETE /api/cycleplans/:cycleId/class/:number?baseUpdatedAt=…                                   — remove
+router.post('/:cycleId/class', protect, async (req, res) => {
+  try {
+    const r = await store.editRow(req.user, req.params.cycleId, req.body.number, req.body, { add: true });
+    res.status(r.status).json(r.body);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+router.patch('/:cycleId/class/:number', protect, async (req, res) => {
+  try {
+    const { baseUpdatedAt, ...patch } = req.body;
+    const r = await store.editRow(req.user, req.params.cycleId, req.params.number, patch, { baseUpdatedAt });
+    res.status(r.status).json(r.body);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+router.delete('/:cycleId/class/:number', protect, async (req, res) => {
+  try {
+    const r = await store.editRow(req.user, req.params.cycleId, req.params.number, {}, { remove: true, baseUpdatedAt: req.query.baseUpdatedAt });
+    res.status(r.status).json(r.body);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
 
 // GET /api/cycleplans/for-date?batch=ID&date=YYYY-MM-DD
 // Returns the planned class (if any) for that batch/date, by scanning the cycle
@@ -226,6 +196,6 @@ router.get('/for-date/lookup', protect, async (req, res) => {
 });
 
 // Shared with the MCP write tools (mcp/writeTools.js).
-router.__shared = { saveCyclePlan, describeChanges };
+router.__shared = { saveCyclePlan: store.saveCyclePlan, describeChanges: store.describeChanges };
 
 module.exports = router;

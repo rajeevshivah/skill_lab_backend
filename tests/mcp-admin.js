@@ -47,7 +47,8 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
 
   const app = express(); app.use(express.json({ limit: '10mb' }));
   for (const [p, r] of [['auth', 'auth'], ['semesters', 'semesters'], ['batches', 'batches'], ['students', 'students'], ['plans', 'plans'],
-    ['logs', 'logs'], ['cycles', 'cycles'], ['marks', 'cyclemarks'], ['cycleplans', 'cycleplans'], ['tokens', 'tokens'], ['performance', 'performance']])
+    ['logs', 'logs'], ['cycles', 'cycles'], ['marks', 'cyclemarks'], ['cycleplans', 'cycleplans'], ['tokens', 'tokens'], ['performance', 'performance'],
+    ['settings', 'settings'], ['meeting', 'meeting'], ['feedback', 'feedback'], ['student-admin', 'studentAdmin']])
     app.use(`/api/${p}`, require(`../routes/${r}`));
   app.use('/mcp', require('../mcp'));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
@@ -73,9 +74,10 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   console.log('\n1. Who sees which tools');
   const aNames = (await cA.listTools()).tools.map(t => t.name);
   const tNames = (await cT.listTools()).tools.map(t => t.name);
-  ok('superadmin sees 36 tools', aNames.length === 36, aNames.length);
-  ok('trainer sees 21 tools (no admin ones)', tNames.length === 21, tNames.length);
-  ok('trainer does NOT see create_user / update_batch / create_cycles', !['create_user', 'update_batch', 'create_cycles', 'list_users'].some(n => tNames.includes(n)));
+  ok('superadmin sees 55 tools', aNames.length === 55, aNames.length);
+  ok('trainer sees 33 tools (no admin ones)', tNames.length === 33, tNames.length);
+  ok('trainer does NOT see create_user / update_batch / plan_cycles / add_holiday', !['create_user', 'update_batch', 'plan_cycles', 'add_holiday', 'list_users', 'create_cycles'].some(n => tNames.includes(n)));
+  ok('create_cycles is gone (plan_cycles replaces it)', !aNames.includes('create_cycles') && aNames.includes('plan_cycles'));
   ok('trainer sees add_students / edit_student / set_batch_plan', ['add_students', 'edit_student', 'set_batch_plan'].every(n => tNames.includes(n)));
   ok('no tool can delete', !aNames.some(n => /delete|remove_/.test(n)));
   ok('trainer calling admin tool anyway → refused', (await call(cT, 'create_user', { name: 'X Y', email: 'x@y.com' })).isError);
@@ -118,11 +120,17 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   ok('retire batch (inactive) — nothing deleted', (await yes(cA, 'update_batch', { batch_id: String(fs2._id), active: false })).saved.data?.saved && await Batch.exists({ _id: fs2._id }));
 
   console.log('\n4. Cycles');
-  const cc = await yes(cA, 'create_cycles', { batch_ids: [String(mern._id), String(da._id)], start_date: '2026-10-05', end_date: '2026-10-18' });
-  ok('preview: MERN cycle 1, Data Analyst skipped (overlap)', cc.preview.data.changes[0].willCreate && !cc.preview.data.changes[1].willCreate);
-  ok('bulk create saved 1, skipped 1', cc.saved.data?.created?.length === 1 && cc.saved.data.skipped.length === 1, cc.saved.text);
+  const pc0 = await call(cA, 'plan_cycles', { groups: [{ batch_ids: [String(mern._id)], start_date: '2026-10-05', end_date: '2026-10-18' }] });
+  ok('plan_cycles refused until the timetable is set', pc0.isError && /timetable/i.test(pc0.text), pc0.text);
+  ok('set_timetable', (await yes(cA, 'set_timetable', { batch_id: String(mern._id), days: ['mon', 'tue', 'wed', 'thu'] })).saved.data?.days?.join() === '1,2,3,4');
+  await yes(cA, 'set_timetable', { batch_id: String(da._id), days: ['mon', 'wed'] });
+  const cc = await yes(cA, 'plan_cycles', { groups: [{ name: 'All', batch_ids: [String(mern._id)], start_date: '2026-10-05', end_date: '2026-10-18', project_day: '2026-10-15' }] });
+  ok('plan_cycles preview: MERN cycle 1, 8 class days', cc.preview.data?.changes?.[0]?.cycle === 1 && cc.preview.data.changes[0].classDays === 8, cc.preview.text);
+  ok('plan_cycles created it', cc.saved.data?.created?.length === 1, cc.saved.text);
   const mc = await Cycle.findOne({ batch: mern._id });
-  ok('end before start refused', (await call(cA, 'create_cycles', { batch_ids: [String(mern._id)], start_date: '2026-11-10', end_date: '2026-11-01' })).isError);
+  ok('overlapping plan refused', (await call(cA, 'plan_cycles', { groups: [{ batch_ids: [String(mern._id), String(da._id)], start_date: '2026-10-10', end_date: '2026-10-20' }] })).isError);
+  ok('end before start refused', (await call(cA, 'plan_cycles', { groups: [{ batch_ids: [String(mern._id)], start_date: '2026-11-10', end_date: '2026-11-01' }] })).isError);
+  ok('trainer cannot plan cycles', (await call(cT, 'plan_cycles', { groups: [{ batch_ids: [String(da._id)], start_date: '2026-12-01', end_date: '2026-12-10' }] })).isError);
   ok('update_cycle dates', (await yes(cA, 'update_cycle', { cycle_id: String(mc._id), end_date: '2026-10-20' })).saved.data?.cycle?.end === '2026-10-20');
   ok('open report', (await yes(cA, 'set_cycle_status', { cycle_id: String(mc._id), action: 'open_report' })).saved.data?.status === 'report-open');
   const close = await yes(cA, 'set_cycle_status', { cycle_id: String(mc._id), action: 'close' });
@@ -202,6 +210,48 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
     ok('unknown lead name refused', bad.isError && /exactly one trainer/.test(bad.text), bad.text);
     const gp = await call(cA, 'get_trainer_performance', {});
     ok('get_trainer_performance returns periods', !gp.isError && Array.isArray(gp.data?.periods), gp.text?.slice(0, 200));
+  }
+
+  console.log('\n6. Operations tools (round 4)');
+  {
+    const daCycle = await Cycle.findOne({ batch: da._id, number: 1 });
+    const tt = await call(cA, 'get_timetables', {});
+    ok('get_timetables', !tt.isError && tt.data.batches.find(b => b.name === 'Full Stack').source === 'saved', tt.text?.slice(0, 200));
+    ok('trainer cannot read timetables tool', (await call(cT, 'get_timetables', {})).isError);
+    const hol = await yes(cA, 'add_holiday', { from: '2026-10-07', title: 'Fest', batch_ids: [String(da._id)], mode: 'mark' });
+    ok('add_holiday (mark): preview then saved', /Fest/.test(hol.preview.data?.summary || '') && hol.saved.data?.ok, hol.preview.text);
+    const lh = await call(cT, 'list_holidays', {});
+    const hid = lh.data?.holidays?.find(h => h.title === 'Fest')?._id;
+    ok('list_holidays (trainer)', !!hid, lh.text?.slice(0, 200));
+    ok('undo_holiday', (await yes(cA, 'undo_holiday', { holiday_id: String(hid) })).saved.data?.ok === true);
+    ok('set_plan_editing open', (await yes(cA, 'set_plan_editing', { open: true, cycle_id: String(daCycle._id) })).saved.data?.ok && (await Cycle.findById(daCycle._id)).planOpen);
+    ok('set_plan_editing needs cycle or period', (await call(cA, 'set_plan_editing', { open: false })).isError);
+    const acc = await call(cT, 'get_student_access', { batch_id: String(da._id) });
+    ok('get_student_access (own batch)', !acc.isError && /^[A-Z2-9]{6}$/.test(acc.data.joinCode), acc.text?.slice(0, 200));
+    const nj = await yes(cT, 'new_join_code', { batch_id: String(da._id) });
+    ok('new_join_code', nj.saved.data?.joinCode && nj.saved.data.joinCode !== acc.data.joinCode);
+    const st = await Student.create({ name: 'Zed', roll: '501', batch: da._id, semester: sem._id, login: { passwordHash: 'x', activatedAt: new Date() } });
+    ok('reset_student_password', (await yes(cT, 'reset_student_password', { student_id: String(st._id) })).saved.data?.ok === true);
+    const sub = await yes(cT, 'set_project_submission', { cycle_id: String(daCycle._id), open: true, minutes: 30 });
+    ok('set_project_submission open', sub.saved.data?.window?.open === true, sub.saved.text);
+    ok('get_project_submissions shows it open', (await call(cT, 'get_project_submissions', { cycle_id: String(daCycle._id) })).data?.window?.open === true);
+    const of = await yes(cA, 'open_feedback', { batch_ids: [String(da._id)], hours: 24, title: 'Test feedback' });
+    const wid = of.saved.data?.window?._id;
+    ok('open_feedback', !!wid, of.saved.text);
+    ok('get_feedback_results list', (await call(cT, 'get_feedback_results', {})).data?.windows?.some(w => String(w._id) === String(wid)));
+    ok('get_feedback_results one', !(await call(cT, 'get_feedback_results', { window_id: String(wid) })).isError);
+    ok('close_feedback', (await yes(cA, 'close_feedback', { window_id: String(wid), close: true })).saved.data?.ok === true);
+    ok('trainer cannot open feedback', (await call(cT, 'open_feedback', { batch_ids: [String(da._id)] })).isError);
+    const nt = await yes(cT, 'add_meeting_note', { scope: 'day', date: '2026-10-07', batch_id: String(da._id), text: 'Revise joins' });
+    const nid = nt.saved.data?.note?._id;
+    ok('add_meeting_note (own batch)', !!nid, nt.saved.text);
+    ok('add_meeting_note day needs date', (await call(cT, 'add_meeting_note', { scope: 'day', batch_id: String(da._id), text: 'x' })).isError);
+    ok('list_meeting_notes', (await call(cT, 'list_meeting_notes', { scope: 'day', batch_id: String(da._id) })).data?.notes?.length === 1);
+    ok('update_meeting_note done', (await yes(cT, 'update_meeting_note', { note_id: String(nid), status: 'done' })).saved.data?.note?.status === 'done');
+    const md = await call(cA, 'get_meeting_day', { date: '2026-10-07' });
+    ok('get_meeting_day', !md.isError && Array.isArray(md.data.batches), md.text?.slice(0, 200));
+    const rv = await call(cA, 'get_cycle_review', {});
+    ok('get_cycle_review', !rv.isError && Array.isArray(rv.data.trainers), rv.text?.slice(0, 200));
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

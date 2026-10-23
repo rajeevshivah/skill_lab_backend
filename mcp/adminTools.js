@@ -337,49 +337,7 @@ admin(writeTool({
 
 // ═════════════════════ CYCLES (admin) ═════════════════════════════════
 
-admin(writeTool({
-  name: 'create_cycles',
-  title: 'Create cycle(s)',
-  description:
-    'Superadmin only. Create a cycle for one batch, or the same dates for several batches at once (each batch gets its own next ' +
-    'number). Batches whose existing cycle overlaps the dates are skipped. A cycle starts as "active" (teaching).',
-  input: {
-    batch_ids: z.array(z.string()).min(1).max(30),
-    start_date: isoDate, end_date: isoDate,
-    name: z.string().max(80).optional(),
-    number: z.number().int().min(1).max(100).optional().describe('Only when creating for ONE batch; default = next number'),
-  },
-  async plan(args, me, ctx) {
-    if (args.end_date < args.start_date) throw new ToolError('End date is before start date.');
-    if (args.number && args.batch_ids.length > 1) throw new ToolError('number can only be set when creating for one batch.');
-    const s = dayKey(args.start_date), e = dayKey(args.end_date);
-    const rows = [];
-    for (const id of args.batch_ids) {
-      const b = await findBatch(id);
-      const overlap = await Cycle.findOne({ batch: b._id, startDate: { $lte: e }, endDate: { $gte: s } });
-      const last = await Cycle.findOne({ batch: b._id }).sort('-number');
-      const num = args.number || (last ? last.number + 1 : 1);
-      const taken = args.number ? await Cycle.findOne({ batch: b._id, number: args.number }) : null;
-      rows.push({ batch: b.name, number: num,
-                  willCreate: !overlap && !taken,
-                  ...(overlap ? { skippedBecause: `overlaps Cycle ${overlap.number} (${ymd(overlap.startDate)} to ${ymd(overlap.endDate)})` } : {}),
-                  ...(taken ? { skippedBecause: `Cycle ${args.number} already exists` } : {}) });
-    }
-    if (!rows.some(r => r.willCreate)) throw new ToolError('Nothing would be created: ' + rows.map(r => `${r.batch}: ${r.skippedBecause}`).join('; '));
-    return {
-      summary: `Create ${rows.filter(r => r.willCreate).length} cycle(s), ${args.start_date} to ${args.end_date}`,
-      changes: rows,
-      apply: async () => {
-        if (args.batch_ids.length === 1) {
-          const out = unwrap(await ctx.api('POST', '/api/cycles', { batch: args.batch_ids[0], number: args.number, name: args.name, startDate: args.start_date, endDate: args.end_date }));
-          return { created: [{ number: out.cycle.number, cycleId: out.cycle._id }] };
-        }
-        const out = unwrap(await ctx.api('POST', '/api/cycles/bulk', { batches: args.batch_ids, name: args.name, startDate: args.start_date, endDate: args.end_date }));
-        return { created: out.created, skipped: out.skipped };
-      },
-    };
-  },
-}));
+// Cycles are created only through plan_cycles (mcp/opsTools.js → the cycle planner).
 
 admin(writeTool({
   name: 'update_cycle',

@@ -8,6 +8,8 @@ const classEntrySchema = new mongoose.Schema({
   trainer:{ type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   date:   { type: String, default: '' },           // 'YYYY-MM-DD' (kept as string; simple + tz-safe)
   time:   { type: String, default: '' },           // 'HH:MM' free text
+  updatedAt: { type: Date, default: null },        // last change to THIS row (conflict check for one-row edits)
+  updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 }, { _id: true });
 
 // One plan per cycle (a cycle belongs to one batch, so this is per-batch-per-cycle).
@@ -23,7 +25,7 @@ const cyclePlanSchema = new mongoose.Schema({
     by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     text: String,
   }],
-}, { timestamps: true });
+}, { timestamps: true, optimisticConcurrency: true });   // two saves at once → the second gets a VersionError (→ 409), never a silent overwrite
 
 cyclePlanSchema.index({ batch: 1 });
 

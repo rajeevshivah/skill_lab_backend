@@ -22,6 +22,7 @@ const CyclePlan = require('../models/CyclePlan');
 const DailyLog  = require('../models/DailyLog');
 const Holiday   = require('../models/Holiday');
 const perf      = require('./performance');
+const planStore = require('./planStore');
 
 const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const wd = (ymd) => new Date(ymd + 'T12:00:00Z').getUTCDay();
@@ -76,6 +77,7 @@ async function preview({ from, to, title, batchIds, mode }, semester, { excludeI
     const held = new Set(logs.filter(l => l.status !== 'no-class').map(l => perf.dayYmd(l.date)));
     for (let ci = 0; ci < cycles.length; ci++) {
       const c = cycles[ci];
+      if (c.status === 'closed') continue;      // closed cycles are history — never moved
       const plan = await CyclePlan.findOne({ cycle: c._id }).lean();
       const later = (plan?.classes || []).filter(k => isYmd(k.date) && k.date >= from && !held.has(k.date))
         .sort((a, b) => a.date.localeCompare(b.date) || a.number - b.number);
@@ -123,13 +125,13 @@ async function preview({ from, to, title, batchIds, mode }, semester, { excludeI
   return { from, to, title: title || 'Holiday', mode: mode === 'mark' ? 'mark' : 'shift', batches: out, ok: !out.some(r => r.conflict) };
 }
 
-async function writePlanDates(user, cycleId, changes, text) {
-  const plan = await CyclePlan.findOne({ cycle: cycleId });
-  if (!plan) return;
-  for (const k of plan.classes) { const m = changes.find(x => x.number === k.number && x.from === k.date); if (m) k.date = m.to; }
-  plan.changes = [...(plan.changes || []), { at: new Date(), by: user._id, text }].slice(-60);
-  plan.updatedBy = user._id;
-  await plan.save();
+// Move class dates through the plan store (history + row versions), as admin.
+async function writePlanDates(user, cycleId, changes, note) {
+  const r = await planStore.editPlan(user, cycleId, (list) => list.map(k => {
+    const m = changes.find(x => x.number === k.number && x.from === k.date);
+    return m ? { ...k, date: m.to } : k;
+  }), { skipLock: true, note });
+  if (r.status !== 200) throw new Error(r.body?.message || 'Could not move classes');
 }
 
 async function apply(input, semester, user) {
@@ -142,7 +144,7 @@ async function apply(input, semester, user) {
     const byCycle = new Map();
     for (const m of r.moves) { const k = String(m.cycleId); if (!byCycle.has(k)) byCycle.set(k, []); byCycle.get(k).push(m); }
     for (const [cid, ms] of byCycle) {
-      await writePlanDates(user, cid, ms, `Holiday ${label}: ${ms.map(m => `class ${m.number} ${m.from} → ${m.to}`).join('; ')}`.slice(0, 400));
+      await writePlanDates(user, cid, ms, `Holiday ${label}`);
       for (const m of ms) h.moves.push({ cycle: cid, batch: r.batchId, number: m.number, from: m.from, to: m.to });
     }
     for (const ch of r.cycleChanges) {
@@ -170,7 +172,7 @@ async function remove(id, user) {
     const plan = await CyclePlan.findOne({ cycle: cid }).lean();
     const ok = ms.filter(m => (plan?.classes || []).some(k => k.number === m.number && k.date === m.from));
     skipped.push(...ms.filter(m => !ok.includes(m)).map(m => `class ${m.number} (changed since)`));
-    if (ok.length) await writePlanDates(user, cid, ok, `Holiday removed (${h.title}): ${ok.map(m => `class ${m.number} back to ${m.to}`).join('; ')}`.slice(0, 400));
+    if (ok.length) await writePlanDates(user, cid, ok, `Holiday removed (${h.title})`);
   }
   for (const r of h.cycleChanges) {
     const c = await Cycle.findById(r.cycle); if (!c) continue;

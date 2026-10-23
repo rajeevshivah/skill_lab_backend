@@ -8,6 +8,7 @@ const Student  = require('../models/Student');
 const Semester = require('../models/Semester');
 const { protect, superadminOnly, canAccessBatch } = require('../middleware/auth');
 const perf = require('../services/performance');
+const planner = require('../services/cyclePlanner');
 const router   = express.Router();
 
 function dayKey(d) { const dt = new Date(d); dt.setHours(0,0,0,0); return dt; }
@@ -114,14 +115,6 @@ router.get('/', protect, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// GET /api/cycles/next-number?batch=ID  — suggest the next per-batch number
-router.get('/next-number', protect, async (req, res) => {
-  try {
-    const last = await Cycle.findOne({ batch: req.query.batch }).sort('-number');
-    res.json({ next: last ? last.number + 1 : 1 });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
 // GET /api/cycles/:id  — includes live data if open, snapshot if closed
 router.get('/:id', protect, async (req, res) => {
   try {
@@ -133,78 +126,22 @@ router.get('/:id', protect, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// POST /api/cycles/bulk  (admin) — create a cycle on the same dates for several batches.
-// Each batch gets its OWN per-batch number. Batches with a date overlap are skipped.
-router.post('/bulk', protect, superadminOnly, async (req, res) => {
+// ── Creating cycles: ONLY through the cycle planner (services/cyclePlanner.js) ──
+// POST /api/cycles/planner/preview  (admin) — { groups, holidays } → what would be created; saves nothing
+router.post('/planner/preview', protect, superadminOnly, async (req, res) => {
   try {
-    const { batches, name, startDate, endDate } = req.body;
-    if (!Array.isArray(batches) || !batches.length || !startDate || !endDate)
-      return res.status(400).json({ message: 'Batches, start and end dates required' });
-
-    const s = dayKey(startDate), e = dayKey(endDate);
-    if (e < s) return res.status(400).json({ message: 'End date is before start date' });
-
-    const created = [], skipped = [];
-    for (const batchId of batches) {
-      const batchDoc = await Batch.findById(batchId);
-      if (!batchDoc) { skipped.push({ batchId, reason: 'batch not found' }); continue; }
-
-      const overlap = await Cycle.findOne({ batch: batchId, startDate: { $lte: e }, endDate: { $gte: s } });
-      if (overlap) { skipped.push({ batchId, name: batchDoc.name, reason: `overlaps Cycle ${overlap.number}` }); continue; }
-
-      const last = await Cycle.findOne({ batch: batchId }).sort('-number');
-      const num = last ? last.number + 1 : 1;
-      try {
-        const c = await Cycle.create({
-          batch: batchId, semester: batchDoc.semester, number: num, name: name || '',
-          startDate: s, endDate: e, createdBy: req.user._id, track: { tracked: true, trackedFrom: new Date() },
-        });
-        created.push({ batchId, name: batchDoc.name, number: num, cycleId: c._id });
-      } catch (err) {
-        skipped.push({ batchId, name: batchDoc.name, reason: 'could not create' });
-      }
-    }
-    res.status(201).json({ created, skipped, createdCount: created.length, skippedCount: skipped.length });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+    const sem = await Semester.findOne({ status: 'active' });
+    if (!sem) return res.status(400).json({ message: 'No active semester' });
+    res.json(await planner.preview(req.body || {}, sem));
+  } catch (err) { res.status(400).json({ message: err.message }); }
 });
-
-// POST /api/cycles  (admin) — create a cycle; enforce non-overlapping dates per batch
-router.post('/', protect, superadminOnly, async (req, res) => {
+// POST /api/cycles/planner  (admin) — create the cycles (+ holidays + dated class rows)
+router.post('/planner', protect, superadminOnly, async (req, res) => {
   try {
-    const { batch, number, name, startDate, endDate } = req.body;
-    if (!batch || !startDate || !endDate)
-      return res.status(400).json({ message: 'Batch, start and end dates required' });
-    const batchDoc = await Batch.findById(batch);
-    if (!batchDoc) return res.status(404).json({ message: 'Batch not found' });
-
-    const s = dayKey(startDate), e = dayKey(endDate);
-    if (e < s) return res.status(400).json({ message: 'End date is before start date' });
-
-    // overlap check within the same batch
-    const overlap = await Cycle.findOne({
-      batch,
-      startDate: { $lte: e },
-      endDate:   { $gte: s },
-    });
-    if (overlap)
-      return res.status(400).json({ message: `Dates overlap with Cycle ${overlap.number} in this batch.` });
-
-    let num = number;
-    if (!num) {
-      const last = await Cycle.findOne({ batch }).sort('-number');
-      num = last ? last.number + 1 : 1;
-    }
-
-    const cycle = await Cycle.create({
-      batch, semester: batchDoc.semester, number: num, name: name || '',
-      startDate: s, endDate: e, createdBy: req.user._id, track: { tracked: true, trackedFrom: new Date() },
-    });
-    res.status(201).json({ cycle });
-  } catch (err) {
-    if (err.code === 11000)
-      return res.status(400).json({ message: 'That cycle number already exists for this batch.' });
-    res.status(500).json({ message: err.message });
-  }
+    const sem = await Semester.findOne({ status: 'active' });
+    if (!sem) return res.status(400).json({ message: 'No active semester' });
+    res.status(201).json(await planner.create(req.body || {}, sem, req.user));
+  } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
 // PATCH /api/cycles/:id  (admin) — edit dates/number/name (not while closed)
@@ -219,6 +156,9 @@ router.patch('/:id', protect, superadminOnly, async (req, res) => {
     if (name !== undefined)      cycle.name = name;
     if (startDate !== undefined) cycle.startDate = dayKey(startDate);
     if (endDate !== undefined)   cycle.endDate = dayKey(endDate);
+    if (cycle.endDate < cycle.startDate) return res.status(400).json({ message: 'End date is before start date.' });
+    const overlap = await Cycle.findOne({ _id: { $ne: cycle._id }, batch: cycle.batch, startDate: { $lte: cycle.endDate }, endDate: { $gte: cycle.startDate } });
+    if (overlap) return res.status(400).json({ message: `Dates overlap with Cycle ${overlap.number} in this batch.` });
     await cycle.save();
     res.json({ cycle });
   } catch (err) {
@@ -328,6 +268,7 @@ router.delete('/:id', protect, superadminOnly, async (req, res) => {
     const CyclePlan = require('../models/CyclePlan');
     const removed = await CycleMark.deleteMany({ cycle: req.params.id });
     await CyclePlan.deleteMany({ cycle: req.params.id });
+    await require('../models/ProjectSubmission').deleteMany({ cycle: req.params.id });
     await Cycle.findByIdAndDelete(req.params.id);
     res.json({ message: 'Cycle deleted', removedMarks: removed.deletedCount || 0 });
   } catch (err) { res.status(500).json({ message: err.message }); }
