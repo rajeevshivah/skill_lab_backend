@@ -45,19 +45,33 @@ router.get('/board', protect, async (req, res) => {
       || periods.find(p => p.start <= now && p.end >= new Date(now.getTime() - 86400000))
       || [...periods].reverse().find(p => p.start <= now) || periods[periods.length - 1];
 
-    const cycles = await Cycle.find({ _id: { $in: pick.ids } })
-      .populate({ path: 'batch', select: 'name track trainers', populate: { path: 'trainers', select: 'name isActive' } })
-      .populate('planOpenBy', 'name');
+    const pS = ymdOf(pick.start), pE = ymdOf(pick.end);
+    const Holiday = require('../models/Holiday');
+    // Bulk loads: one query per kind of data for every batch (the board refreshes every 15 s).
+    const [cycles, plans, holOf, hols] = await Promise.all([
+      Cycle.find({ _id: { $in: pick.ids } }).select('-report')
+        .populate({ path: 'batch', select: 'name track trainers', populate: { path: 'trainers', select: 'name isActive' } })
+        .populate('planOpenBy', 'name'),
+      CyclePlan.find({ cycle: { $in: pick.ids } }).populate('classes.trainer', 'name').populate('classes.updatedBy', 'name').populate('changes.by', 'name').lean(),
+      sv.holidayFinder(pS, pE),
+      Holiday.find({ semester: semester._id, from: { $lte: pE }, to: { $gte: pS } }).populate('batches', 'name').lean(),
+    ]);
+    const live = cycles.filter(c => c.batch);
+    const [allLogs, pulseOf] = await Promise.all([
+      live.length ? DailyLog.find({ $or: live.map(c => ({ batch: c.batch._id, date: { $gte: c.startDate, $lte: c.endDate } })) })
+        .select('batch date status planClass github notes completeAt loggedBy').populate('loggedBy', 'name').lean() : [],
+      sv.pulseFinder(live.map(c => ({ batch: c.batch._id, from: ymdOf(c.startDate), to: ymdOf(c.endDate) }))),
+    ]);
+    const planOf = new Map(plans.map(p => [String(p.cycle), p]));
     const isAdmin = req.user.role === 'superadmin';
     const out = [];
-    for (const c of cycles) {
-      const plan = await CyclePlan.findOne({ cycle: c._id }).populate('classes.trainer', 'name').populate('classes.updatedBy', 'name').populate('changes.by', 'name').lean();
-      const logs = await DailyLog.find({ batch: c.batch._id, date: { $gte: c.startDate, $lte: c.endDate } })
-        .select('date status planClass github notes completeAt loggedBy').populate('loggedBy', 'name').lean();
+    for (const c of live) {
+      const plan = planOf.get(String(c._id)) || null;
+      const logs = allLogs.filter(l => String(l.batch) === String(c.batch._id) && l.date >= c.startDate && l.date <= c.endDate);
       const logBy = new Map(logs.map(l => [ymdOf(l.date), l]));
       const s = ymdOf(c.startDate), e = ymdOf(c.endDate);
-      const pulseBy = new Map((await sv.pulseSummary(c.batch._id, s, e)).map(p => [p.date, p]));
-      const holTitle = await sv.holidaysBetween(c.batch._id, s, e);
+      const pulseBy = new Map(pulseOf(c.batch._id, s, e).map(p => [p.date, p]));
+      const holTitle = (d) => holOf(c.batch._id, d);
       const mine = (c.batch.trainers || []).some(t => String(t._id) === String(req.user._id));
       const complete = store.isComplete(plan?.classes);
       const logView = (l) => l && ({ status: l.status, planClass: l.planClass, github: l.github, by: l.loggedBy?.name || '',
@@ -88,9 +102,6 @@ router.get('/board', protect, async (req, res) => {
       });
     }
     out.sort((a, b) => a.batch.name.localeCompare(b.batch.name));
-    const Holiday = require('../models/Holiday');
-    const pS = ymdOf(pick.start), pE = ymdOf(pick.end);
-    const hols = await Holiday.find({ semester: semester._id, from: { $lte: pE }, to: { $gte: pS } }).populate('batches', 'name').lean();
     res.json({
       periods: periods.map(p => ({ key: p.key, numbers: [...p.numbers].sort((a, b) => a - b), batches: p.batches, start: ymdOf(p.start), end: ymdOf(p.end) })),
       period: pick.key, start: ymdOf(pick.start), end: ymdOf(pick.end), isAdmin, ruleFrom: logRule.RULE_FROM, cycles: out,

@@ -14,7 +14,7 @@ router.get('/', protect, async (req, res) => {
     const batches = await Batch.find(filter)
       .populate('trainers', 'name email role')
       .populate('semester', 'name status')
-      .sort('name');
+      .sort('name').lean();
     res.json({ batches });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -31,7 +31,7 @@ router.get('/mine', protect, async (req, res) => {
     const batches = await Batch.find(filter)
       .populate('trainers', 'name email role')
       .populate('semester', 'name status')
-      .sort('name');
+      .sort('name').lean();
     res.json({ batches });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -41,11 +41,12 @@ router.get('/mine', protect, async (req, res) => {
 // GET /api/batches/:id
 router.get('/:id', protect, async (req, res) => {
   try {
-    const batch = await Batch.findById(req.params.id)
-      .populate('trainers', 'name email role')
-      .populate('semester', 'name status');
+    if (!require('mongoose').isValidObjectId(req.params.id)) return res.status(404).json({ message: 'Batch not found' });
+    const [batch, studentCount] = await Promise.all([
+      Batch.findById(req.params.id).populate('trainers', 'name email role').populate('semester', 'name status').lean(),
+      Student.countDocuments({ batch: req.params.id }),
+    ]);
     if (!batch) return res.status(404).json({ message: 'Batch not found' });
-    const studentCount = await Student.countDocuments({ batch: batch._id });
     res.json({ batch, studentCount });
   } catch (err) {
     res.status(500).json({ message: err.message });

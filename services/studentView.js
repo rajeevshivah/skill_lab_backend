@@ -125,10 +125,7 @@ async function studentHome(s) {
 }
 
 // Batch-level pulse totals per date (staff view). No student names, ever.
-async function pulseSummary(batchId, from, to) {
-  const q = { batch: batchId };
-  if (from || to) q.date = {}; if (from) q.date.$gte = from; if (to) q.date.$lte = to;
-  const rows = await ClassPulse.find(q).select('date covered understanding').lean();
+function summarisePulse(rows) {
   const by = new Map();
   for (const r of rows) {
     const e = by.get(r.date) || { date: r.date, n: 0, yes: 0, partly: 0, no: 0, u: 0 };
@@ -140,5 +137,25 @@ async function pulseSummary(batchId, from, to) {
     understanding: Math.round(10 * e.u / e.n) / 10,
   }));
 }
+async function pulseSummary(batchId, from, to) {
+  const q = { batch: batchId };
+  if (from || to) q.date = {}; if (from) q.date.$gte = from; if (to) q.date.$lte = to;
+  return summarisePulse(await ClassPulse.find(q).select('date covered understanding').lean());
+}
 
-module.exports = { holidayOn, holidaysBetween, todayIST, fmtIST, submitWindow, currentCycle, classOn, ratableTrainers, studentHome, pulseSummary, IST };
+// ── Bulk versions for pages that show many batches at once (one query, not one per batch) ──
+// Holidays overlapping [from, to] → (batchId, ymd) => title | null
+async function holidayFinder(from, to) {
+  const hs = await Holiday.find({ from: { $lte: to }, to: { $gte: from } }).select('from to title batches').lean();
+  return (batchId, d) => hs.find(h => d >= h.from && d <= h.to
+    && (!(h.batches || []).length || h.batches.some(b => String(b) === String(batchId))))?.title || null;
+}
+// Pulse for many { batch, from, to } ranges → (batchId, from, to) => summary list (same shape as pulseSummary)
+async function pulseFinder(ranges) {
+  const rs = ranges.filter(r => r.batch && r.from && r.to);
+  const rows = rs.length ? await ClassPulse.find({ $or: rs.map(r => ({ batch: r.batch, date: { $gte: r.from, $lte: r.to } })) })
+    .select('batch date covered understanding').lean() : [];
+  return (batchId, from, to) => summarisePulse(rows.filter(r => String(r.batch) === String(batchId) && r.date >= from && r.date <= to));
+}
+
+module.exports = { holidayOn, holidaysBetween, todayIST, fmtIST, submitWindow, currentCycle, classOn, ratableTrainers, studentHome, pulseSummary, holidayFinder, pulseFinder, IST };

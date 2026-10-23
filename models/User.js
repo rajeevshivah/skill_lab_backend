@@ -23,4 +23,11 @@ userSchema.methods.comparePassword = function(candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };
 
+// Drop the auth middleware's cached copy whenever a user changes (services/userCache.js).
+const forget = (doc) => require('../services/userCache').forget(doc?._id);
+userSchema.post('save', forget);
+userSchema.post('findOneAndUpdate', forget);
+userSchema.post('findOneAndDelete', forget);
+userSchema.post(['updateOne', 'updateMany', 'deleteOne', 'deleteMany'], () => require('../services/userCache').forget(null));
+
 module.exports = mongoose.model('User', userSchema);

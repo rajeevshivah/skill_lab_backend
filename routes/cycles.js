@@ -1,4 +1,5 @@
 const express  = require('express');
+const mongoose = require('mongoose');
 const Cycle    = require('../models/Cycle');
 const Batch    = require('../models/Batch');
 const DailyLog = require('../models/DailyLog');
@@ -61,21 +62,26 @@ async function computeLiveData(cycle) {
   return { avgAttendance: attPct, sessionsHeld, topicsPlanned, topicsCompleted, top3, totalStudents };
 }
 
-// GET /api/cycles/halloffame?semester=ID  (PUBLIC) — cycles that have top-3, newest first
-// Shape for the public page: grouped client-side as Cycle -> Batch -> top3
+// GET /api/cycles/halloffame[?semester=ID]  (PUBLIC) — newest cycle with a top-3 per batch.
+// Without ?semester it uses the active one and also returns the semester list, so the
+// public page needs ONE request. Photos are NOT inlined: each top-3 entry carries a
+// small cacheable photo URL (see /:id/photo/:rank below).
 router.get('/halloffame', async (req, res) => {
   try {
-    const filter = { 'report.top3.0': { $exists: true } }; // has at least one top3 entry
-    if (req.query.semester) filter.semester = req.query.semester;
-    const cycles = await Cycle.find(filter)
+    let semesters = null, semId = req.query.semester || null;
+    if (!semId) {
+      semesters = await Semester.find().select('name status startDate endDate').sort('-createdAt').lean();
+      semId = (semesters.find(s => s.status === 'active') || semesters[0])?._id || null;
+    }
+    if (!semId) return res.json({ semester: null, semesters: semesters || [], cycles: [] });
+    const cycles = await Cycle.find({ semester: semId, 'report.top3.0': { $exists: true } })
+      .select('-track -report.top3.photo.data')
       .populate('batch', 'name track')
-      .sort('-startDate');
+      .sort('-startDate').lean();
 
     // Only the newest cycle per batch belongs on the board — otherwise an
-    // older cycle's top-3 (e.g. MERN Stack Cycle 1) keeps sitting alongside
-    // a newer one (Cycle 2) for the same batch/track forever. `cycles` is
-    // already newest-first, so keeping the first occurrence per batch is
-    // enough.
+    // older cycle's top-3 keeps sitting alongside a newer one for the same
+    // batch forever. `cycles` is newest-first, so keep the first per batch.
     const seenBatch = new Set();
     const latestPerBatch = cycles.filter(c => {
       const key = c.batch?._id ? String(c.batch._id) : `no-batch-${c._id}`;
@@ -88,13 +94,29 @@ router.get('/halloffame', async (req, res) => {
       _id: c._id, number: c.number, name: c.name,
       startDate: c.startDate, endDate: c.endDate,
       batch: c.batch ? { _id: c.batch._id, name: c.batch.name, track: c.batch.track } : null,
-      top3: (c.report.top3 || []).sort((a,b)=>a.rank-b.rank).map(t => ({
+      top3: (c.report.top3 || []).sort((a, b) => a.rank - b.rank).map(t => ({
         rank: t.rank, name: t.name, roll: t.roll, github: t.github,
-        photo: t.photo?.data ? `data:${t.photo.contentType};base64,${t.photo.data}` : null,
+        photo: t.photo?.contentType ? `/cycles/${c._id}/photo/${t.rank}?v=${new Date(c.updatedAt || 0).getTime()}` : null,
       })),
     }));
-    res.json({ cycles: out });
+    // A short public cache: the board changes a few times a cycle, not every second.
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json({ semester: semId, ...(semesters ? { semesters } : {}), cycles: out });
   } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// GET /api/cycles/:id/photo/:rank  (PUBLIC) — one top-3 photo as an image.
+// The URL carries ?v=<last change>, so browsers may keep it for a year.
+router.get('/:id/photo/:rank', async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).end();
+    const c = await Cycle.findById(req.params.id).select('report.top3').lean();
+    const t = (c?.report?.top3 || []).find(x => x.rank === Number(req.params.rank));
+    if (!t?.photo?.data) return res.status(404).end();
+    res.set('Content-Type', t.photo.contentType || 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(Buffer.from(t.photo.data, 'base64'));
+  } catch (err) { res.status(500).end(); }
 });
 
 // GET /api/cycles?batch=ID  or ?semester=ID
@@ -108,9 +130,9 @@ router.get('/', protect, async (req, res) => {
       const myBatches = await Batch.find({ trainers: req.user._id }).select('_id');
       filter.batch = { $in: myBatches.map(b => b._id) };
     }
-    const cycles = await Cycle.find(filter)
+    const cycles = await Cycle.find(filter).select('-report.top3.photo')   // photos: only on the report page / hall of fame
       .populate('batch', 'name track trainers')
-      .sort('-startDate');
+      .sort('-startDate').lean();
     res.json({ cycles });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });

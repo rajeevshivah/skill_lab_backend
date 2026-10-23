@@ -6,7 +6,7 @@ const router    = express.Router();
 // GET /api/semesters  (public read — needed by public page)
 router.get('/', async (req, res) => {
   try {
-    const semesters = await Semester.find().sort('-createdAt');
+    const semesters = await Semester.find().sort('-createdAt').lean();
     res.json({ semesters });
   } catch (err) {
     res.status(500).json({ message: err.message });

@@ -45,22 +45,38 @@ const noteView = (n) => ({ _id: n._id, scope: n.scope, date: n.date, period: n.p
 const populateNote = (q) => q.populate('batch', 'name').populate('trainer', 'name').populate('createdBy', 'name').populate('doneBy', 'name');
 
 // ── Daily review ──
+// Everything for all batches is loaded in a few parallel bulk queries (one round trip
+// per kind of data, not per batch).
 async function dayView(user, date) {
   const sem = await Semester.findOne({ status: 'active' });
   if (!sem) return { date, batches: [] };
   const day = perf.ymdToDay(date);
-  const cycles = await Cycle.find({ semester: sem._id, startDate: { $lte: day }, endDate: { $gte: day } })
-    .populate({ path: 'batch', select: 'name track trainers', populate: { path: 'trainers', select: 'name isActive' } }).lean();
-  const mine = await myBatchIds(user);
+  const [cycles, mine, holOf, notes] = await Promise.all([
+    Cycle.find({ semester: sem._id, startDate: { $lte: day }, endDate: { $gte: day } }).select('number batch')
+      .populate({ path: 'batch', select: 'name track trainers', populate: { path: 'trainers', select: 'name isActive' } }).lean(),
+    myBatchIds(user),
+    sv.holidayFinder(date, date),
+    // notes for that day + still-open notes from earlier days
+    populateNote(MeetingNote.find({ semester: sem._id, scope: 'day', $or: [{ date }, { status: 'open', date: { $lt: date } }] }).sort('date createdAt')).lean(),
+  ]);
+  const live = cycles.filter(c => c.batch);
+  const bids = live.map(c => c.batch._id);
+  const [plans, logs, pulseOf] = await Promise.all([
+    CyclePlan.find({ cycle: { $in: live.map(c => c._id) } }).select('cycle classes').lean(),
+    DailyLog.find({ batch: { $in: bids }, date: day }).populate('loggedBy', 'name').populate('firstLoggedBy', 'name').lean(),
+    sv.pulseFinder(bids.map(b => ({ batch: b, from: date, to: date }))),
+  ]);
+  const planOf = new Map(plans.map(p => [sid(p.cycle), p]));
+  const logOf = new Map(logs.map(l => [sid(l.batch), l]));
   const out = [];
-  for (const c of cycles) {
-    const b = c.batch; if (!b) continue;
-    const plan = await CyclePlan.findOne({ cycle: c._id }).select('classes').lean();
+  for (const c of live) {
+    const b = c.batch;
+    const plan = planOf.get(sid(c._id));
     const planned = (plan?.classes || []).filter(k => k.date === date).map(k => ({ number: k.number, title: k.title, notes: k.notes }));
-    const log = await DailyLog.findOne({ batch: b._id, date: day }).populate('loggedBy', 'name').populate('firstLoggedBy', 'name').lean();
-    const holiday = await sv.holidayOn(b._id, date);
+    const log = logOf.get(sid(b._id)) || null;
+    const holiday = holOf(b._id, date);
     if (!planned.length && !log && !holiday) continue;     // no class for this batch that day
-    const pulse = (await sv.pulseSummary(b._id, date, date))[0] || null;
+    const pulse = pulseOf(b._id, date, date)[0] || null;
     const present = log?.attendance?.filter(a => a.present).length ?? null;
     const loggedClass = log?.planClass != null ? (plan?.classes || []).find(k => k.number === log.planClass) : null;
     out.push({
@@ -78,9 +94,6 @@ async function dayView(user, date) {
     });
   }
   out.sort((a, b) => a.batch.localeCompare(b.batch));
-  // notes for that day + still-open notes from earlier days
-  const notes = await populateNote(MeetingNote.find({ semester: sem._id, scope: 'day',
-    $or: [{ date }, { status: 'open', date: { $lt: date } }] }).sort('date createdAt')).lean();
   const visible = notes.filter(n => canSee(user, n, mine)).map(noteView);
   return { date, isAdmin: isAdmin(user), batches: out, notes: visible };
 }
@@ -97,33 +110,50 @@ async function reviewView(user, period) {
   const sem = await Semester.findOne({ status: 'active' });
   if (!sem) return { periods: [], trainers: [] };
   const { buildDashboard } = require('./performance').__shared;
-  const dash = await buildDashboard(sem, { period });
-  const mine = await myBatchIds(user);
+  const [dash, mine] = await Promise.all([buildDashboard(sem, { period }), myBatchIds(user)]);
+  const rows = dash.rows;
+  const cycleIds = rows.map(r => r.cycleId), batchIds = rows.map(r => r.batchId);
+  const minS = rows.reduce((m, r) => (r.start < m ? r.start : m), '9999-12-31');
+  const maxE = rows.reduce((m, r) => (r.end > m ? r.end : m), '0000-01-01');
+  const today = sv.todayIST();
+  // One bulk query per kind of data for every row (was ~10 queries per batch, one after another).
+  const [plans, logs, holOf, marks, studentCounts, subCounts, pulseOf, windows, notes] = await Promise.all([
+    CyclePlan.find({ cycle: { $in: cycleIds } }).select('cycle classes.date').lean(),
+    rows.length ? DailyLog.find({ $or: rows.map(r => ({ batch: r.batchId, date: { $gte: perf.ymdToDay(r.start), $lte: perf.ymdToDay(r.end) } })) }).select('batch date status').lean() : [],
+    sv.holidayFinder(minS, maxE),
+    CycleMark.find({ cycle: { $in: cycleIds } }).select('cycle status category').lean(),
+    Student.aggregate([{ $match: { batch: { $in: batchIds.map(x => new mongoose.Types.ObjectId(String(x))) } } }, { $group: { _id: '$batch', n: { $sum: 1 } } }]),
+    ProjectSubmission.aggregate([{ $match: { cycle: { $in: cycleIds.map(x => new mongoose.Types.ObjectId(String(x))) } } }, { $group: { _id: '$cycle', n: { $sum: 1 } } }]),
+    sv.pulseFinder(rows.map(r => ({ batch: r.batchId, from: r.start, to: r.end }))),
+    rows.length ? FeedbackWindow.find({ batches: { $in: batchIds }, openFrom: { $lte: perf.istToDate(`${maxE}T23:59`) }, openUntil: { $gte: perf.istToDate(`${minS}T00:00`) } }).select('batches openFrom openUntil').lean() : [],
+    populateNote(MeetingNote.find({ semester: sem._id, scope: 'cycle', period: dash.period }).sort('createdAt')).lean(),
+  ]);
+  const feedback = windows.length ? await Feedback.find({ window: { $in: windows.map(w => w._id) }, batch: { $in: batchIds } }).select('window batch trainer ratings').lean() : [];
+  const planOf = new Map(plans.map(p => [sid(p.cycle), p]));
+  const nStudents = new Map(studentCounts.map(x => [sid(x._id), x.n]));
+  const nSubs = new Map(subCounts.map(x => [sid(x._id), x.n]));
   const byTrainer = new Map();
-  for (const r of dash.rows) {
-    const c = await Cycle.findById(r.cycleId).lean();
+  for (const r of rows) {
     const s = r.start, e = r.end;
-    const plan = await CyclePlan.findOne({ cycle: r.cycleId }).select('classes').lean();
-    const classes = (plan?.classes || []).filter(k => k.date && k.date >= s && k.date <= e);
-    const logs = await DailyLog.find({ batch: r.batchId, date: { $gte: c.startDate, $lte: c.endDate } }).select('date status').lean();
-    const status = (st) => logs.filter(l => l.status === st).length;
-    const holTitle = await sv.holidaysBetween(r.batchId, s, e);
-    const today = sv.todayIST();
-    const due = classes.filter(k => k.date <= today && !holTitle(k.date));
-    const loggedDays = new Set(logs.map(l => perf.dayYmd(l.date)));
-    const marks = await CycleMark.find({ cycle: r.cycleId }).select('status category').lean();
-    const cat = (k) => marks.filter(m => m.status === 'evaluated' && m.category === k).length;
-    const students = await Student.countDocuments({ batch: r.batchId });
-    const subs = await ProjectSubmission.countDocuments({ cycle: r.cycleId });
-    const pulse = await sv.pulseSummary(r.batchId, s, e);
+    const classes = (planOf.get(sid(r.cycleId))?.classes || []).filter(k => k.date && k.date >= s && k.date <= e);
+    const myLogs = logs.filter(l => sid(l.batch) === sid(r.batchId) && perf.dayYmd(l.date) >= s && perf.dayYmd(l.date) <= e);
+    const status = (st) => myLogs.filter(l => l.status === st).length;
+    const due = classes.filter(k => k.date <= today && !holOf(r.batchId, k.date));
+    const loggedDays = new Set(myLogs.map(l => perf.dayYmd(l.date)));
+    const myMarks = marks.filter(m => sid(m.cycle) === sid(r.cycleId));
+    const cat = (k) => myMarks.filter(m => m.status === 'evaluated' && m.category === k).length;
+    const students = nStudents.get(sid(r.batchId)) || 0;
+    const subs = nSubs.get(sid(r.cycleId)) || 0;
+    const pulse = pulseOf(r.batchId, s, e);
     const pAvg = (f) => pulse.length ? Math.round(10 * pulse.reduce((a, p) => a + p[f], 0) / pulse.length) / 10 : null;
-    const windows = await FeedbackWindow.find({ batches: r.batchId, openFrom: { $lte: perf.istToDate(`${e}T23:59`) }, openUntil: { $gte: perf.istToDate(`${s}T00:00`) } }).select('_id').lean();
+    const myWindows = new Set(windows.filter(w => (w.batches || []).some(b => sid(b) === sid(r.batchId))
+      && w.openFrom <= perf.istToDate(`${e}T23:59`) && w.openUntil >= perf.istToDate(`${s}T00:00`)).map(w => sid(w._id)));
     const facts = {
       batch: r.batch, batchId: r.batchId, cycleId: r.cycleId, number: r.number, start: s, end: e, projectDate: r.projectDate,
       tracked: r.tracked, overall: r.overall, lateBy: r.lateBy, who: r.who,
       plan: { classes: classes.length, due: due.length, notLogged: due.filter(k => !loggedDays.has(k.date)).length,
         done: status('done'), partial: status('partial'), notDone: status('not-covered'), noClass: status('no-class') },
-      marks: { students, evaluated: marks.filter(m => m.status === 'evaluated').length,
+      marks: { students, evaluated: myMarks.filter(m => m.status === 'evaluated').length,
         excellent: cat('excellent'), moderate: cat('moderate'), basic: cat('basic'), zero: cat('zero') },
       submissions: { submitted: subs, students },
       pulse: { days: pulse.length, coveredPct: pAvg('coveredPct'), understanding: pAvg('understanding') },
@@ -131,8 +161,8 @@ async function reviewView(user, period) {
     for (const p of r.perTrainer) {
       const t = byTrainer.get(p.id) || { id: p.id, name: p.name, batches: [] };
       let fb = null;
-      if (windows.length) {
-        const list = await Feedback.find({ window: { $in: windows.map(w => w._id) }, batch: r.batchId, trainer: p.id }).select('ratings').lean();
+      if (myWindows.size) {
+        const list = feedback.filter(f => myWindows.has(sid(f.window)) && sid(f.batch) === sid(r.batchId) && sid(f.trainer) === String(p.id));
         const n = list.length, show = n && (isAdmin(user) || n >= 5);
         fb = { responses: n, overall: show ? Math.round(10 * list.reduce((a, f) => a + QUESTIONS.reduce((x, [k]) => x + f.ratings[k], 0) / QUESTIONS.length, 0) / n) / 10 : null };
       }
@@ -141,7 +171,6 @@ async function reviewView(user, period) {
     }
   }
   const scores = new Map(dash.trainers.map(t => [String(t.id), t]));
-  const notes = await populateNote(MeetingNote.find({ semester: sem._id, scope: 'cycle', period: dash.period }).sort('createdAt')).lean();
   const trainers = [...byTrainer.values()].map(t => ({
     ...t, thisCycle: scores.get(String(t.id))?.thisCycle ?? null, semesterAvg: scores.get(String(t.id))?.semesterAvg ?? null,
     notes: notes.filter(n => sid(n.trainer) === String(t.id) && canSee(user, n, mine)).map(noteView),

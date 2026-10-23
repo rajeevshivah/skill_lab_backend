@@ -78,25 +78,34 @@ router.get('/oversight', protect, async (req, res) => {
     const batches = await Batch.find(batchFilter).populate('trainers', 'name');
     const today = dayKey(new Date());
 
-    const rows = [];
-    for (const b of batches) {
-      const lastLog = await DailyLog.findOne({ batch: b._id }).sort('-date');
-      const loggedToday = lastLog && dayKey(lastLog.date).getTime() === today.getTime();
-      const plan = await Plan.findOne({ batch: b._id });
+    // All batches at once: plans and student counts in bulk, last log dates in parallel.
+    const ids = batches.map(b => b._id);
+    const [plans, counts, lastLogs] = await Promise.all([
+      Plan.find({ batch: { $in: ids } }).select('batch topics.title topics.status').lean(),
+      Student.aggregate([{ $match: { batch: { $in: ids } } }, { $group: { _id: '$batch', n: { $sum: 1 } } }]),
+      // last log per batch: tiny index lookups sent together (one wait, not one per batch)
+      Promise.all(ids.map(id => DailyLog.findOne({ batch: id }).sort('-date').select('batch date').lean())),
+    ]);
+    const planOf = new Map(plans.map(p => [String(p.batch), p]));
+    const countOf = new Map(counts.map(c => [String(c._id), c.n]));
+    const lastOf = new Map(lastLogs.filter(Boolean).map(x => [String(x.batch), x]));
+    const rows = batches.map((b) => {
+      const lastLog = lastOf.get(String(b._id)) || null;
+      const loggedToday = !!lastLog && dayKey(lastLog.date).getTime() === today.getTime();
+      const plan = planOf.get(String(b._id));
       const totalTopics = plan ? plan.topics.length : 0;
       const doneTopics  = plan ? plan.topics.filter(t => t.status === 'done').length : 0;
       const nextTopic   = plan ? (plan.topics.find(t => t.status !== 'done')?.title || '— plan complete —') : '— no plan —';
-      const studentCount = await Student.countDocuments({ batch: b._id });
-      rows.push({
+      return {
         batchId: b._id, batchName: b.name, track: b.track,
         trainers: b.trainers.map(t => t.name),
         lastLogDate: lastLog ? lastLog.date : null,
         loggedToday,
         planPct: totalTopics ? Math.round((doneTopics / totalTopics) * 100) : 0,
         doneTopics, totalTopics, nextTopic,
-        studentCount,
-      });
-    }
+        studentCount: countOf.get(String(b._id)) || 0,
+      };
+    });
     res.json({ semester: { _id: active._id, name: active.name }, rows });
   } catch (err) {
     res.status(500).json({ message: err.message });

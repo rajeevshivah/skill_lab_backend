@@ -120,7 +120,44 @@ const dayCounts = (list) => ({
   missing: list.filter(x => x.state === 'missing').length,
 });
 
+// Everything scoring needs for MANY cycles, loaded in one round of parallel
+// queries (not ~6 queries per cycle one after another — that made the
+// Performance and Meeting pages take a minute on a far-away database).
+async function loadScoreData(cycles) {
+  const list = cycles.filter(Boolean);
+  const ids = list.map(c => c._id);
+  const batchIds = [...new Set(list.map(c => sid(c.batch)))];
+  const semIds = [...new Set(list.map(c => sid(c.semester)).filter(Boolean))];
+  const marked = list.filter(c => c.track?.marks?.at).map(c => c._id);
+  const ranges = list.map(c => ({ batch: c.batch._id || c.batch, date: { $gte: c.startDate, $lte: c.endDate } }));
+  const [logs, plans, batches, hols, marks] = await Promise.all([
+    ranges.length ? DailyLog.find({ $or: ranges })
+      .select('batch date createdAt loggedBy firstLoggedBy attendanceTaken status planClass github notes completeAt').lean() : [],
+    CyclePlan.find({ cycle: { $in: ids } }).select('cycle classes.date classes.trainer').lean(),
+    Batch.find({ _id: { $in: batchIds } }).select('trainers').populate('trainers', 'name isActive').lean(),
+    semIds.length ? Holiday.find({ semester: { $in: semIds } }).select('semester batches from to').lean() : [],
+    marked.length ? CycleMark.find({ cycle: { $in: marked }, status: 'evaluated' }).select('cycle category').lean() : [],
+  ]);
+  const group = (arr, key) => { const m = new Map(); for (const x of arr) { const k = key(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); } return m; };
+  return {
+    logsByBatch: group(logs, l => sid(l.batch)),
+    planByCycle: new Map(plans.map(p => [sid(p.cycle), p])),
+    batchById: new Map(batches.map(b => [sid(b._id), b])),
+    hols, marksByCycle: group(marks, m => sid(m.cycle)),
+  };
+}
+
+// Scores for many cycles → Map(cycleId → score). Same rules as scoreCycle.
+async function scoreCycles(cycles, now = new Date()) {
+  const data = await loadScoreData(cycles);
+  return new Map(cycles.filter(Boolean).map(c => [sid(c._id), scoreWith(c, data, now)]));
+}
+
 async function scoreCycle(cycle, now = new Date()) {
+  return scoreWith(cycle, await loadScoreData([cycle]), now);
+}
+
+function scoreWith(cycle, data, now) {
   const deadline = deadlineOf(cycle);
   const excused = !!cycle.track?.excusedNote;
   const t = cycle.track || {};
@@ -153,12 +190,11 @@ async function scoreCycle(cycle, now = new Date()) {
   // Daily logs + attendance — every class day so far in the cycle
   const today = istYmd(now);
   const lastDay = dayYmd(cycle.endDate) < today ? dayYmd(cycle.endDate) : today;
-  const [logs, plan] = await Promise.all([
-    DailyLog.find({ batch: cycle.batch, date: { $gte: cycle.startDate, $lte: cycle.endDate } })
-      .select('date createdAt loggedBy firstLoggedBy attendanceTaken status planClass github notes completeAt').lean(),
-    CyclePlan.findOne({ cycle: cycle._id }).select('classes.date classes.trainer').lean(),
-  ]);
-  const batch = await Batch.findById(cycle.batch).select('trainers').populate('trainers', 'name isActive').lean();
+  const bId = sid(cycle.batch);
+  const cs = new Date(cycle.startDate), ce = new Date(cycle.endDate);
+  const logs = (data.logsByBatch.get(bId) || []).filter(l => new Date(l.date) >= cs && new Date(l.date) <= ce);
+  const plan = data.planByCycle.get(sid(cycle._id)) || null;
+  const batch = data.batchById.get(bId) || null;
   const isTrainer = (u) => (batch?.trainers || []).some(x => sid(x) === sid(u));
   const eligible = (batch?.trainers || []).filter(x => x.isActive !== false && !isReviewer(x));
   const isEligible = (u) => eligible.some(x => sid(x) === sid(u));
@@ -168,8 +204,10 @@ async function scoreCycle(cycle, now = new Date()) {
   const days = new Set([...byDay.keys()]);
   for (const c of plan?.classes || []) if (c.date && c.date >= startYmd && c.date <= lastDay) days.add(c.date);
   // Holidays (Settings → Holidays) are never class days for anyone
-  const hols = await Holiday.find({ semester: cycle.semester, $or: [{ batches: { $size: 0 } }, { batches: cycle.batch }],
-    from: { $lte: dayYmd(cycle.endDate) }, to: { $gte: startYmd } }).select('from to').lean();
+  const endYmd = dayYmd(cycle.endDate);
+  const hols = data.hols.filter(h => sid(h.semester) === sid(cycle.semester)
+    && (!(h.batches || []).length || h.batches.some(x => sid(x) === bId))
+    && h.from <= endYmd && h.to >= startYmd);
   const isHol = (d) => hols.some(h => d >= h.from && d <= h.to);
   const logDays = [], noClassDays = [];
   for (const d of [...days].sort()) {
@@ -203,7 +241,7 @@ async function scoreCycle(cycle, now = new Date()) {
 
   // Student outcomes — share of evaluated students at Moderate or above
   if (t.marks?.at) {
-    const marks = await CycleMark.find({ cycle: cycle._id, status: 'evaluated' }).select('category').lean();
+    const marks = data.marksByCycle.get(sid(cycle._id)) || [];
     const good = marks.filter(m => m.category === 'excellent' || m.category === 'moderate').length;
     items.outcomes = marks.length
       ? { state: 'counted', points: WEIGHTS.outcomes * good / marks.length, max: WEIGHTS.outcomes, good, evaluated: marks.length }
@@ -274,4 +312,4 @@ async function scoreCycle(cycle, now = new Date()) {
   };
 }
 
-module.exports = { isReviewer, sid, WEIGHTS, defaultDeadline, deadlineOf, stamp, marksComplete, scoreCycle, dayYmd, istYmd, ymdToDay, istToDate };
+module.exports = { isReviewer, sid, WEIGHTS, defaultDeadline, deadlineOf, stamp, marksComplete, scoreCycle, scoreCycles, dayYmd, istYmd, ymdToDay, istToDate };

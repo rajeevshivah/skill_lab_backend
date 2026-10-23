@@ -1,6 +1,7 @@
 const jwt  = require('jsonwebtoken');
 const User = require('../models/User');
 const Batch = require('../models/Batch');
+const userCache = require('../services/userCache');
 
 exports.protect = async (req, res, next) => {
   try {
@@ -8,7 +9,11 @@ exports.protect = async (req, res, next) => {
     if (!token) return res.status(401).json({ message: 'No token provided' });
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user    = await User.findById(decoded.id).select('-password');
+    let user = userCache.get(decoded.id);
+    if (!user) {
+      user = await User.findById(decoded.id).select('-password');
+      if (user) userCache.set(decoded.id, user);
+    }
     if (!user || !user.isActive)
       return res.status(401).json({ message: 'User not found or inactive' });
 

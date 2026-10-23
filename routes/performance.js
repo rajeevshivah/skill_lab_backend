@@ -48,13 +48,19 @@ async function buildDashboard(semester, { period = null, number = null } = {}) {
     filter = (c) => periodOf(c) === pick;
   }
   const ids = all.filter(filter).map(c => c._id);
-  const cycles = await Cycle.find({ _id: { $in: ids } })
-    .populate({ path: 'batch', select: 'name track trainers', populate: { path: 'trainers', select: 'name role isActive' } })
-    .populate('track.report.by track.marks.by track.top3.by track.plan.by track.waits.owner track.waits.waitingOn', 'name');
+  // Trainer scores also need every other tracked cycle of the semester — load and score them all together.
+  const [cycles, tracked] = await Promise.all([
+    Cycle.find({ _id: { $in: ids } }).select('-report.top3.photo')
+      .populate({ path: 'batch', select: 'name track trainers', populate: { path: 'trainers', select: 'name role isActive' } })
+      .populate('track.report.by track.marks.by track.top3.by track.plan.by track.waits.owner track.waits.waitingOn', 'name'),
+    Cycle.find({ semester: semester._id, 'track.tracked': true, _id: { $nin: ids } }).select('-report')
+      .populate('batch', 'name'),
+  ]);
+  const scores = await perf.scoreCycles([...cycles, ...tracked]);
 
   const rows = [];
   for (const c of cycles) {
-    const s = await perf.scoreCycle(c);
+    const s = scores.get(String(c._id));
     const stampOf = (k) => c.track?.[k]?.at ? { at: c.track[k].at, by: c.track[k].by?.name || '', admin: !!c.track[k].admin } : null;
     rows.push({
       cycleId: c._id, number: c.number,
@@ -76,12 +82,11 @@ async function buildDashboard(semester, { period = null, number = null } = {}) {
   rows.sort((a, b) => a.batch.localeCompare(b.batch));
 
   // Trainer scores: this period + average over every tracked cycle this semester (per-trainer scores)
-  const tracked = await Cycle.find({ semester: semester._id, 'track.tracked': true });
   const per = new Map();
-  for (const c of tracked) {
+  for (const c of [...cycles.filter(x => x.track?.tracked), ...tracked]) {
     const row = rows.find(r => String(r.cycleId) === String(c._id));
-    const pts = row ? row.perTrainer : (await perf.scoreCycle(c)).perTrainer;
-    const bname = row ? row.batch : (await Batch.findById(c.batch).select('name').lean())?.name || '';
+    const pts = row ? row.perTrainer : scores.get(String(c._id)).perTrainer;
+    const bname = row ? row.batch : c.batch?.name || '';
     for (const p of pts) {
       if (p.score == null) continue;
       const e = per.get(p.id) || { id: p.id, name: p.name, scores: [] };
