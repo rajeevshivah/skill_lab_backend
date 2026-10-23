@@ -32,11 +32,11 @@ router.get('/batch/:id', protect, async (req, res) => {
     if (!b) return res.status(404).json({ message: 'Batch not found' });
     if (!(await guard(req, res, b._id))) return;
     if (!b.joinCode) { b.joinCode = await newJoinCode(b.semester); await b.save(); }
-    const students = await Student.find({ batch: b._id }).select('name roll login.activatedAt login.lastLoginAt github photo.contentType').sort('roll').lean();
+    const students = await Student.find({ batch: b._id }).select('name roll demo login.activatedAt login.lastLoginAt github photo.contentType').sort('roll').setOptions({ withDemo: true }).lean();
     res.json({ joinCode: b.joinCode,
-      activated: students.filter(s => s.login?.activatedAt).length, total: students.length,
+      activated: students.filter(s => s.login?.activatedAt && !s.demo).length, total: students.filter(s => !s.demo).length,
       students: students.map(s => ({ _id: s._id, name: s.name, roll: s.roll, github: s.github || '',
-        activated: !!s.login?.activatedAt, lastLoginAt: s.login?.lastLoginAt || null, hasPhoto: !!s.photo?.contentType })) });
+        activated: !!s.login?.activatedAt, lastLoginAt: s.login?.lastLoginAt || null, hasPhoto: !!s.photo?.contentType, demo: !!s.demo })) });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 

@@ -63,7 +63,7 @@ router.post('/activate', async (req, res) => {
     const sem = await Semester.findOne({ status: 'active' });
     const batch = sem && await Batch.findOne({ semester: sem._id, joinCode: String(code).trim().toUpperCase() });
     if (!batch) { fail(k); return res.status(400).json({ message: 'That batch code is not right. Check the code your trainer showed.' }); }
-    const matches = await Student.find({ batch: batch._id, roll: rollRe(roll) }).select('+login.passwordHash');
+    const matches = await Student.find({ batch: batch._id, roll: rollRe(roll) }).select('+login.passwordHash').setOptions({ withDemo: true });
     if (!matches.length) { fail(k); return res.status(400).json({ message: 'This roll number is not in that batch. Ask your trainer to check the roster.' }); }
     if (matches.length > 1) return res.status(409).json({ message: 'Two students have this roll number in the batch. Ask your trainer to fix it.' });
     const s = matches[0];
@@ -84,7 +84,7 @@ router.post('/login', async (req, res) => {
     if (!roll || !password) return res.status(400).json({ message: 'Roll number and password are needed.' });
     const sem = await Semester.findOne({ status: 'active' });
     if (!sem) return res.status(400).json({ message: 'No active semester.' });
-    const list = await Student.find({ semester: sem._id, roll: rollRe(roll) }).select('+login.passwordHash');
+    const list = await Student.find({ semester: sem._id, roll: rollRe(roll) }).select('+login.passwordHash').setOptions({ withDemo: true });
     for (const s of list) {
       if (s.login?.passwordHash && await bcrypt.compare(String(password), s.login.passwordHash)) {
         s.login.lastLoginAt = new Date(); await s.save();
@@ -139,6 +139,7 @@ router.put('/photo', protectStudent, async (req, res) => {
 // POST /api/student/submission { cycleId, githubUrl, liveUrl, note, screenshot: { data(base64), contentType } }
 router.post('/submission', protectStudent, async (req, res) => {
   try {
+    if (req.student.demo) return res.status(201).json({ ok: true, demo: true, message: 'Demo account — this was not saved.' });
     const s = req.student, b = req.body || {};
     const cycle = await Cycle.findById(b.cycleId);
     if (!cycle || String(cycle.batch) !== String(s.batch)) return res.status(404).json({ message: 'Cycle not found' });
@@ -163,6 +164,7 @@ router.post('/submission', protectStudent, async (req, res) => {
 // POST /api/student/pulse { covered: yes|partly|no, understanding: 1-5 } — today's class only
 router.post('/pulse', protectStudent, async (req, res) => {
   try {
+    if (req.student.demo) return res.status(201).json({ ok: true, demo: true, message: 'Demo account — this was not saved.' });
     const { covered, understanding } = req.body || {};
     if (!['yes', 'partly', 'no'].includes(covered)) return res.status(400).json({ message: 'Choose yes, partly or no.' });
     const u = Number(understanding);
@@ -179,6 +181,7 @@ router.post('/pulse', protectStudent, async (req, res) => {
 // POST /api/student/feedback { windowId, trainerId, ratings: {clarity,…}, comment }
 router.post('/feedback', protectStudent, async (req, res) => {
   try {
+    if (req.student.demo) return res.status(201).json({ ok: true, demo: true, message: 'Demo account — this was not saved.' });
     const s = req.student, b = req.body || {};
     const w = await FeedbackWindow.findById(b.windowId);
     const now = new Date();

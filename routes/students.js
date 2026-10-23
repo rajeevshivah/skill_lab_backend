@@ -287,6 +287,7 @@ router.put('/:id', protect, async (req, res) => {
     }
 
     if (flagged !== undefined) existing.flagged = flagged;
+    if (req.body.demo !== undefined && req.user.role === 'superadmin') existing.demo = !!req.body.demo;   // admin only
     if (photo !== undefined) {
       if (photo === null || photo === '') existing.photo = { data: null, contentType: null };
       else {

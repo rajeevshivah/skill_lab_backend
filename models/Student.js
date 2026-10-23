@@ -18,6 +18,10 @@ const studentSchema = new mongoose.Schema({
     presentCount:  { type: Number, default: 0 },  // sessions present
     totalSessions: { type: Number, default: 0 },  // sessions held for their batch
   },
+  // Demo / review account (e.g. for the MD to try the student side). Left out of
+  // every roster, count, marks sheet, attendance and Top 3 — see the hook below —
+  // and nothing a demo student answers is saved.
+  demo:     { type: Boolean, default: false },
   // Manual flag from a trainer — "watch this one"
   flagged:  { type: Boolean, default: false },
   photo: {
@@ -45,5 +49,20 @@ studentSchema.virtual('attendancePct').get(function () {
 });
 
 studentSchema.set('toJSON', { virtuals: true });
+
+// Demo students are invisible to lists and counts unless a query asks for them
+// with .setOptions({ withDemo: true }) (student sign-in, the Student login tab).
+// findById/findOne are not filtered, so a demo student can still open their page.
+function hideDemo() {
+  if (this.getOptions().withDemo) return;
+  const q = this.getQuery();
+  if (!('demo' in q)) this.where({ demo: { $ne: true } });
+}
+studentSchema.pre('find', hideDemo);
+studentSchema.pre('countDocuments', hideDemo);
+studentSchema.pre('aggregate', function () {
+  if (this.options?.withDemo) return;
+  this.pipeline().unshift({ $match: { demo: { $ne: true } } });
+});
 
 module.exports = mongoose.model('Student', studentSchema);

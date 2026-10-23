@@ -119,7 +119,7 @@ async function studentHome(s) {
   const photo = s.photo?.data ? `data:${s.photo.contentType};base64,${s.photo.data}` : null;
 
   return {
-    student: { id: s._id, name: s.name, roll: s.roll, github: s.github || '', course: s.course, sem: s.sem, section: s.section, photo },
+    student: { id: s._id, name: s.name, roll: s.roll, github: s.github || '', course: s.course, sem: s.sem, section: s.section, photo, demo: !!s.demo },
     achievements,
     batch: { id: batch?._id, name: batch?.name, track: batch?.track || '', trainers: trainers.map(t => t.name) },
     today,

@@ -633,6 +633,7 @@ anyone(writeTool({
     name: z.string().max(120).optional(), new_roll: z.string().max(40).optional(),
     course: z.string().max(40).optional(), sem: z.string().max(20).optional(), section: z.string().max(20).optional(), year: z.string().max(20).optional(),
     flagged: z.boolean().optional(),
+    demo: z.boolean().optional().describe('Superadmin only. A demo/review account: left out of rosters, counts, marks, attendance and Top 3; nothing it answers is saved.'),
   },
   async plan(args, me, ctx) {
     let s;
@@ -645,8 +646,9 @@ anyone(writeTool({
     } else throw new ToolError('Give student_id, or roll + batch_id.');
     if (!s) throw new ToolError('Student not found.');
     if (!(await canAccessBatch(me, s.batch))) throw new ToolError('You can only edit students in your own batches.');
+    if (args.demo !== undefined && me.role !== 'superadmin') throw new ToolError('Only the admin can make a demo account.');
     const body = {}, changes = [];
-    const map = { name: 'name', new_roll: 'roll', course: 'course', sem: 'sem', section: 'section', year: 'year', flagged: 'flagged' };
+    const map = { name: 'name', new_roll: 'roll', course: 'course', sem: 'sem', section: 'section', year: 'year', flagged: 'flagged', demo: 'demo' };
     for (const [a, f] of Object.entries(map))
       if (args[a] !== undefined && args[a] !== s[f]) { body[f] = args[a]; changes.push({ field: f, from: s[f], to: args[a] }); }
     if (!changes.length) throw new ToolError('Nothing to change.');
