@@ -88,6 +88,10 @@ const ymd = (d) => perf.dayYmd(d);
   let c = await Cycle.findById(c4._id), b = await Cycle.findById(b4._id);
   ok('plan stamp by trainer (admin=false)', c.track.plan?.at && c.track.plan.admin === false && String(c.track.plan.by) === String(samant._id));
   ok('plan stamp by admin (admin=true)', b.track.plan?.at && b.track.plan.admin === true);
+  {
+    const sp = await perf.scoreCycle(b);
+    ok('admin-made plan is shown but not counted (two-way planning)', sp.items.plan.state === 'admin-planned' && sp.items.plan.max === 0, JSON.stringify(sp.items.plan));
+  }
 
   // marks: only partial first → no stamp; complete → stamp
   await http('POST', `/api/cycles/${c4._id}/open`, { token: T(admin) });

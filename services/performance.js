@@ -14,7 +14,8 @@
 //  Score (out of 100, only over the parts that are already due):
 //    daily log same day 35 · report+marks+Top3 on time 30 (10 each)
 //    cycle plan before start 15 · attendance taken 10 · student outcomes 10
-//  Anything done by an admin gives the trainer 0 for that part.
+//  Anything done by an admin gives the trainer 0 for that part — except the cycle plan:
+//  a plan the admin made is not counted at all (planning can be done by either side).
 //
 //  Who is scored for what (batches with several trainers):
 //    lead          — one trainer per cycle (default: the batch's first trainer)
@@ -137,7 +138,9 @@ async function scoreCycle(cycle, now = new Date()) {
   const afterFrom = fromYmd ? istYmd(new Date(from).getTime() + 2 * DAY) : null;
   const planDueYmd = afterFrom && afterFrom > startYmd ? afterFrom : startYmd;
   if (t.plan?.at) {
-    if (t.plan.admin) items.plan = { state: 'admin', points: 0, max: WEIGHTS.plan, at: t.plan.at };
+    // Plans are a two-way job: the admin may design the plan himself. An admin-made plan is
+    // shown as such but NOT counted — the trainer is neither credited nor penalised.
+    if (t.plan.admin) items.plan = { state: 'admin-planned', points: 0, max: 0, at: t.plan.at };
     else {
       const lateDays = Math.max(0, (ymdToDay(istYmd(t.plan.at)) - ymdToDay(planDueYmd)) / DAY);
       items.plan = lateDays === 0 ? { state: 'on-time', points: 15, max: 15, at: t.plan.at }
