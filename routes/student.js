@@ -127,6 +127,15 @@ router.put('/github', protectStudent, async (req, res) => {
   res.json({ ok: true, github: g });
 });
 
+// PUT /api/student/photo { photo: "data:image/jpeg;base64,…" | null }
+// The student's profile photo — also the photo on the Hall of Fame when they are Top 3.
+router.put('/photo', protectStudent, async (req, res) => {
+  try {
+    const r = await require('../services/studentPhoto').set(req.student._id, req.body?.photo ?? null);
+    res.json({ ok: true, ...r });
+  } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
 // POST /api/student/submission { cycleId, githubUrl, liveUrl, note, screenshot: { data(base64), contentType } }
 router.post('/submission', protectStudent, async (req, res) => {
   try {
@@ -145,6 +154,7 @@ router.post('/submission', protectStudent, async (req, res) => {
       set.screenshot = { data: String(b.screenshot.data), contentType: b.screenshot.contentType };
     }
     await ProjectSubmission.updateOne({ cycle: cycle._id, student: s._id }, { $set: set }, { upsert: true });
+    await require('../services/studentStats').recompute([s._id]);   // Placement: projects submitted
     const sub = await ProjectSubmission.findOne({ cycle: cycle._id, student: s._id }).lean();
     res.status(201).json({ ok: true, submission: { githubUrl: sub.githubUrl, liveUrl: sub.liveUrl, note: sub.note, submittedAt: sub.submittedAt, late: sub.late, hasScreenshot: !!sub.screenshot?.contentType } });
   } catch (err) { res.status(500).json({ message: err.message }); }

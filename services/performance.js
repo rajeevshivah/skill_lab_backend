@@ -312,4 +312,4 @@ function scoreWith(cycle, data, now) {
   };
 }
 
-module.exports = { isReviewer, sid, WEIGHTS, defaultDeadline, deadlineOf, stamp, marksComplete, scoreCycle, scoreCycles, dayYmd, istYmd, ymdToDay, istToDate };
+module.exports = { isReviewer, sid, WEIGHTS, defaultDeadline, deadlineOf, projectDayOf, stamp, marksComplete, scoreCycle, scoreCycles, dayYmd, istYmd, ymdToDay, istToDate };

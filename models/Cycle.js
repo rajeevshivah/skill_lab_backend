@@ -13,6 +13,10 @@ const reportSchema = new mongoose.Schema({
   topicsPlanned:   { type: Number, default: null },
   topicsCompleted: { type: Number, default: null },
   // top3 captured as text so the report stays stable even if toppers change later
+  // Top 3 is filled AUTOMATICALLY from the marks once every student has a mark
+  // (services/topThree.js). top3Manual=true means a trainer changed the order or
+  // the people by hand — then marks no longer overwrite it (until reset).
+  top3Manual: { type: Boolean, default: false },
   top3: [{
     rank:   Number,
     student:{ type: mongoose.Schema.Types.ObjectId, ref: 'Student', default: null },

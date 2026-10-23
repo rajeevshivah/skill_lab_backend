@@ -3,8 +3,10 @@ const mongoose = require('mongoose');
 const Cycle    = require('../models/Cycle');
 const Batch    = require('../models/Batch');
 const DailyLog = require('../models/DailyLog');
-const Plan     = require('../models/Plan');
-const Topper   = require('../models/Topper');
+const CyclePlan = require('../models/CyclePlan');
+const sv       = require('../services/studentView');
+const topThree = require('../services/topThree');
+const studentStats = require('../services/studentStats');
 const Student  = require('../models/Student');
 const Semester = require('../models/Semester');
 const { protect, superadminOnly, canAccessBatch } = require('../middleware/auth');
@@ -14,52 +16,42 @@ const router   = express.Router();
 
 function dayKey(d) { const dt = new Date(d); dt.setHours(0,0,0,0); return dt; }
 
-// Toppers store the cycle as a free-text label ("Cycle 3"). Match on the number
-// the label contains, not on substring containment — `"Cycle 11".includes("1")`
-// was true, so Cycle 1 pulled in the toppers of 10, 11, 12 and 21.
-function labelNumber(label) {
-  const m = String(label ?? '').match(/\d+/);
-  return m ? parseInt(m[0], 10) : null;
-}
-// An unlabelled legacy topper belongs to whichever cycle asks for it.
-function topperBelongsToCycle(topperCycleLabel, cycleNumber) {
-  if (!topperCycleLabel) return true;
-  const n = labelNumber(topperCycleLabel);
-  return n === null || n === cycleNumber;
-}
-
-// Compute live report numbers for a cycle from daily logs / plan / toppers in its date range.
+// Live report numbers for a cycle — all from the cycle's own records:
+//   sessions held / attendance — daily logs in the cycle (not "no class" days)
+//   classes planned / completed — the cycle plan (holidays left out) vs logs marked done
+//   Top 3 — ranked from the marks (services/topThree.js)
 async function computeLiveData(cycle) {
-  const start = dayKey(cycle.startDate);
-  const end   = dayKey(cycle.endDate); end.setHours(23,59,59,999);
+  const s = perf.dayYmd(cycle.startDate), e = perf.dayYmd(cycle.endDate);
+  const end = dayKey(cycle.endDate); end.setHours(23, 59, 59, 999);
+  const [logs, plan, holOf, ranked, totalStudents] = await Promise.all([
+    DailyLog.find({ batch: cycle.batch, date: { $gte: dayKey(cycle.startDate), $lte: end } }).select('date status planClass attendance').lean(),
+    CyclePlan.findOne({ cycle: cycle._id }).select('classes.number classes.date').lean(),
+    sv.holidayFinder(s, e),
+    topThree.rank(cycle),
+    Student.countDocuments({ batch: cycle.batch }),
+  ]);
+  const held = logs.filter(l => l.status !== 'no-class');
+  let present = 0, total = 0;
+  for (const l of held) for (const a of l.attendance || []) { total++; if (a.present) present++; }
+  const planned = (plan?.classes || []).filter(k => k.date && k.date >= s && k.date <= e && !holOf(cycle.batch, k.date));
+  const doneNumbers = new Set(held.filter(l => l.status === 'done' && l.planClass != null).map(l => l.planClass));
+  return {
+    avgAttendance: total ? Math.round(present / total * 100) : null,
+    sessionsHeld: held.length,
+    topicsPlanned: planned.length,
+    topicsCompleted: planned.filter(k => doneNumbers.has(k.number)).length,
+    top3: ranked.map(({ rank, student, name, roll }) => ({ rank, student, name, roll })),
+    totalStudents,
+  };
+}
 
-  const logs = await DailyLog.find({ batch: cycle.batch, date: { $gte: start, $lte: end } });
-  const sessionsHeld = logs.length;
-
-  // average attendance % across sessions
-  let attPct = null;
-  if (sessionsHeld) {
-    let present = 0, total = 0;
-    for (const log of logs) {
-      for (const a of log.attendance) { total++; if (a.present) present++; }
-    }
-    attPct = total ? Math.round((present / total) * 100) : 0;
-  }
-
-  const plan = await Plan.findOne({ batch: cycle.batch });
-  const topicsPlanned   = plan ? plan.topics.length : 0;
-  const topicsCompleted = plan ? plan.topics.filter(t => t.status === 'done').length : 0;
-
-  const toppers = await Topper.find({ batch: cycle.batch }).populate('student', 'name roll');
-  const top3 = toppers
-    .filter(t => topperBelongsToCycle(t.cycle, cycle.number))
-    .sort((a,b) => a.rank - b.rank)
-    .slice(0, 3)
-    .map(t => ({ rank: t.rank, name: t.student?.name || '', roll: t.student?.roll || '' }));
-
-  const totalStudents = await Student.countDocuments({ batch: cycle.batch });
-
-  return { avgAttendance: attPct, sessionsHeld, topicsPlanned, topicsCompleted, top3, totalStudents };
+// Can this user fill the cycle report now? Admin: any time until closed.
+// Trainer of the batch: from the batch's project day (or earlier if the admin opened it).
+function reportState(cycle, user) {
+  const opensOn = perf.dayYmd(perf.projectDayOf(cycle));
+  if (cycle.status === 'closed') return { open: false, opensOn, reason: 'This cycle is closed. Ask admin to reopen it.' };
+  if (user.role === 'superadmin' || cycle.status === 'report-open' || perf.istYmd(new Date()) >= opensOn) return { open: true, opensOn };
+  return { open: false, opensOn, reason: `The report opens on the project day (${opensOn}).` };
 }
 
 // GET /api/cycles/halloffame[?semester=ID]  (PUBLIC) — newest cycle with a top-3 per batch.
@@ -144,7 +136,8 @@ router.get('/:id', protect, async (req, res) => {
     if (!cycle) return res.status(404).json({ message: 'Cycle not found' });
     let live = null;
     if (cycle.status !== 'closed') live = await computeLiveData(cycle);
-    res.json({ cycle, live });
+    const rs = reportState(cycle, req.user);
+    res.json({ cycle, live, reportOpen: rs.open, reportOpensOn: rs.opensOn, reportNote: rs.reason || '' });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -214,11 +207,12 @@ router.post('/:id/close', protect, superadminOnly, async (req, res) => {
     if (r.sessionsHeld == null)    r.sessionsHeld = live.sessionsHeld;
     if (r.topicsPlanned == null)   r.topicsPlanned = live.topicsPlanned;
     if (r.topicsCompleted == null) r.topicsCompleted = live.topicsCompleted;
-    if (!r.top3 || !r.top3.length) r.top3 = live.top3;
+    if ((!r.top3 || !r.top3.length) && !r.top3Manual) r.top3 = live.top3;   // from the marks
     if (r.totalStudents == null)   r.totalStudents = live.totalStudents;
     cycle.status = 'closed';
     cycle.closedAt = new Date();
     await cycle.save();
+    await studentStats.recompute((r.top3 || []).map(t => t.student));
     res.json({ cycle });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -239,10 +233,8 @@ async function saveCycleReport(user, cycleId, input) {
     if (!cycle) return { status: 404, body: { message: 'Cycle not found' } };
     if (!(await canAccessBatch(req.user, cycle.batch)))
       return { status: 403, body: { message: 'Not your batch' } };
-    if (cycle.status === 'closed')
-      return { status: 400, body: { message: 'This cycle is closed. Ask admin to reopen it.' } };
-    if (cycle.status !== 'report-open' && req.user.role !== 'superadmin')
-      return { status: 400, body: { message: 'The report is not open yet.' } };
+    const rs = reportState(cycle, req.user);
+    if (!rs.open) return { status: 400, body: { message: rs.reason } };
 
     const allowed = [
       'avgAttendance','sessionsHeld','topicsPlanned','topicsCompleted',
@@ -253,8 +245,15 @@ async function saveCycleReport(user, cycleId, input) {
     ];
     for (const k of allowed) if (k in req.body) cycle.report[k] = req.body[k];
 
+    // "Back to automatic": drop the hand-made Top 3 and rank from the marks again.
+    const before3 = (cycle.report.top3 || []).map(t => String(t.student || t.roll || t.name));
+    if (req.body.top3Auto === true) {
+      cycle.report.top3Manual = false;
+      cycle.report.top3 = [];
+      await topThree.publish(cycle, req.user);
+    }
     // top3: sanitize photos (accept data-URL, store as {data,contentType}); cap 2MB each
-    if (Array.isArray(req.body.top3)) {
+    else if (Array.isArray(req.body.top3)) {
       const MAX = 2 * 1024 * 1024;
       cycle.report.top3 = req.body.top3.map(t => {
         let photo = { data: null, contentType: null };
@@ -269,6 +268,10 @@ async function saveCycleReport(user, cycleId, input) {
           name: t.name || '', roll: t.roll || '', github: t.github || '', photo,
         };
       });
+      // A different set or order of people than the stored Top 3 = a hand-made choice;
+      // from now on new marks don't overwrite it. (Adding photos/links is not a change.)
+      const after3 = cycle.report.top3.map(t => String(t.student || t.roll || t.name));
+      if (after3.join(',') !== before3.join(',')) cycle.report.top3Manual = true;
     }
 
     cycle.report.submitted = true;
@@ -279,6 +282,8 @@ async function saveCycleReport(user, cycleId, input) {
     if (allowed.some(k => k in req.body)) await perf.stamp(cycle, 'report', req.user);
     if (Array.isArray(req.body.top3) && req.body.top3.length) await perf.stamp(cycle, 'top3', req.user);
     await cycle.save();
+    const changed3 = (cycle.report.top3 || []).map(t => String(t.student || ''));
+    if (changed3.join(',') !== before3.join(',')) await studentStats.recompute([...before3, ...changed3].filter(x => /^[a-f0-9]{24}$/.test(x)));
     return { status: 200, body: { cycle } };
 }
 
@@ -297,7 +302,6 @@ router.delete('/:id', protect, superadminOnly, async (req, res) => {
 });
 
 // Exported for tests — pure helpers, no database involved.
-router.__test = { labelNumber, topperBelongsToCycle };
 // Shared with the MCP write tools (mcp/writeTools.js).
 router.__shared = { saveCycleReport, computeLiveData };
 

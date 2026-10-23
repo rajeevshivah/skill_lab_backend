@@ -104,10 +104,13 @@ const ymd = (d) => perf.dayYmd(d);
   // report + Top 3
   await http('PUT', `/api/cycles/${c4._id}/report`, { token: T(samant), body: { problemsFaced: 'none', performanceRating: 4 } });
   c = await Cycle.findById(c4._id);
-  ok('report stamped, Top 3 not yet', c.track.report?.at && !c.track.top3?.at);
+  ok('report stamped', !!c.track.report?.at);
+  // Top 3 follows the marks by itself: complete marks above already stamped it, by the trainer
+  ok('Top 3 stamped automatically with complete marks', c.track.top3?.at && c.track.top3.admin === false && Math.abs(c.track.top3.at - c.track.marks.at) < 5000);
+  ok('…and picked from the marks', c.report.top3.map(t => t.roll).join(',') === '101,102', JSON.stringify(c.report.top3.map(t => t.roll)));
   await http('PUT', `/api/cycles/${c4._id}/report`, { token: T(samant), body: { top3: [{ rank: 1, student: S[0]._id, name: 'Aman', roll: '101' }] } });
   c = await Cycle.findById(c4._id);
-  ok('Top 3 stamped', c.track.top3?.at && c.track.top3.admin === false);
+  ok('a hand-made Top 3 still saves (and stays the first completion time)', c.report.top3.length === 1 && c.report.top3Manual === true);
   const firstAt = +c.track.report.at;
   await http('PUT', `/api/cycles/${c4._id}/report`, { token: T(samant), body: { reflection: 'edit' } });
   c = await Cycle.findById(c4._id);

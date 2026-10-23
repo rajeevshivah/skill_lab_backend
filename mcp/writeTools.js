@@ -317,7 +317,9 @@ writeTools.push(writeTool({
   description:
     'Set the Top 3 of a cycle (what the public Hall of Fame shows): rank 1–3, student by roll or id, optional GitHub link. ' +
     'Photos already uploaded for the same student are kept; new photos must be uploaded on the website. ' +
-    'Same rules as the cycle report form (it is part of it): report must be open, never once closed.',
+    'Normally NOT needed: the Top 3 fills itself from the marks once every student has a mark (update_cycle_marks). ' +
+    'Use this only to override it by hand — after that, new marks no longer change it. ' +
+    'Same rules as the cycle report form (it is part of it): opens on the project day, never once closed.',
   input: {
     cycle_id: z.string(),
     top3: z.array(z.object({

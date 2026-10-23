@@ -6,6 +6,7 @@ const Student   = require('../models/Student');
 const DailyLog  = require('../models/DailyLog');
 const { protect, canAccessBatch } = require('../middleware/auth');
 const perf = require('../services/performance');
+const topThree = require('../services/topThree');
 const router    = express.Router();
 
 function dayKey(d) { const dt = new Date(d); dt.setHours(0,0,0,0); return dt; }
@@ -145,11 +146,14 @@ async function saveCycleMarks(user, cycleId, inputRows) {
 
     if (ops.length) await CycleMark.bulkWrite(ops);
     // Accountability: marks count as done once every student has an entry.
+    let top3Updated = false;
     if (ops.length && (cycle.track?.marks?.at || await perf.marksComplete(cycle))) {
       await perf.stamp(cycle, 'marks', req.user);
+      // Marks complete → Top 3 (and so the Hall of Fame) follows automatically.
+      top3Updated = await topThree.publish(cycle, req.user);
       await cycle.save();
     }
-    return { status: 200, body: { saved: ops.length } };
+    return { status: 200, body: { saved: ops.length, top3Updated, top3: (cycle.report?.top3 || []).map(t => ({ rank: t.rank, name: t.name, roll: t.roll })) } };
 }
 
 // GET /api/marks/:cycleId/top3-suggestion  — top 3 by total marks (evaluated only)
@@ -159,16 +163,7 @@ router.get('/:cycleId/top3-suggestion', protect, async (req, res) => {
     if (!cycle) return res.status(404).json({ message: 'Cycle not found' });
     if (!(await canAccessBatch(req.user, cycle.batch)))
       return res.status(403).json({ message: 'Not your batch' });
-    const held = cycle.assessmentHeld !== false;
-    const marks = await CycleMark.find({ cycle: cycle._id, status: 'evaluated' })
-      .populate('student', 'name roll');
-    const ranked = marks
-      .map(m => ({ student: m.student?._id, name: m.student?.name, roll: m.student?.roll,
-                   total: CycleMark.scoreOf(m.assessment, m.project, held).total }))
-      .filter(x => x.total > 0)
-      .sort((a,b) => b.total - a.total)
-      .slice(0, 3)
-      .map((x, i) => ({ rank: i+1, ...x }));
+    const ranked = (await topThree.rank(cycle)).map(({ rank, student, name, roll, total }) => ({ rank, student, name, roll, total }));
     res.json({ top3: ranked });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });

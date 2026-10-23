@@ -6,17 +6,14 @@ const Topper    = require('../models/Topper');
 const { protect, canAccessBatch, noCotrainer } = require('../middleware/auth');
 const router  = express.Router();
 
-const MAX_PHOTO_SIZE  = 2 * 1024 * 1024;
 const MAX_IMPORT_ROWS = 1000;
 const ROLL_RE = /^[A-Za-z0-9][A-Za-z0-9._/\-]{0,31}$/;
 
+// Same checks as the student's own upload (services/studentPhoto.js): real JPG/PNG/WEBP, ≤ 400 KB.
+// Returns { data, contentType } | { data: null } for "no photo" | null when the file is not acceptable.
 function sanitizePhoto(photoData) {
-  if (!photoData) return { data: null, contentType: null };
-  const match = photoData.match(/^data:(image\/\w+);base64,(.+)$/);
-  if (!match) return { data: null, contentType: null };
-  const buffer = Buffer.from(match[2], 'base64');
-  if (buffer.length > MAX_PHOTO_SIZE) return null;
-  return { data: match[2], contentType: match[1] };
+  try { return require('../services/studentPhoto').parse(photoData) || { data: null, contentType: null }; }
+  catch { return null; }
 }
 
 const clean = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
@@ -161,7 +158,7 @@ router.post('/', protect, async (req, res) => {
     let photoDoc = { data: null, contentType: null };
     if (photo) {
       const p = sanitizePhoto(photo);
-      if (p === null) return res.status(400).json({ message: 'Photo too large. Max 2MB.' });
+      if (p === null) return res.status(400).json({ message: 'Photo must be a JPG, PNG or WEBP under 400 KB.' });
       photoDoc = p;
     }
     const student = await Student.create({
@@ -294,12 +291,14 @@ router.put('/:id', protect, async (req, res) => {
       if (photo === null || photo === '') existing.photo = { data: null, contentType: null };
       else {
         const p = sanitizePhoto(photo);
-        if (p === null) return res.status(400).json({ message: 'Photo too large. Max 2MB.' });
+        if (p === null) return res.status(400).json({ message: 'Photo must be a JPG, PNG or WEBP under 400 KB.' });
         existing.photo = p;
       }
     }
     existing.updatedBy = req.user._id;
     await existing.save();
+    // Same photo on the Hall of Fame wherever this student is in a Top 3
+    if (photo !== undefined) await require('../services/studentPhoto').sync(existing._id);
     res.json({ student: existing });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -316,10 +315,12 @@ router.delete('/:id', protect, noCotrainer, async (req, res) => {
       return res.status(403).json({ message: 'You can only delete students in your batch' });
 
     const force = req.query.force === '1' && req.user.role === 'superadmin';
-    const [markCount, topperCount] = await Promise.all([
+    const [markCount, oldTops, cycleTops] = await Promise.all([
       CycleMark.countDocuments({ student: student._id }),
       Topper.countDocuments({ student: student._id }),
+      require('../models/Cycle').countDocuments({ 'report.top3.student': student._id }),
     ]);
+    const topperCount = oldTops + cycleTops;
 
     if ((markCount || topperCount) && !force) {
       return res.status(409).json({

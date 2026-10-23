@@ -8,6 +8,8 @@ const { protect, canAccessBatch, noCotrainer } = require('../middleware/auth');
 const Cycle     = require('../models/Cycle');
 const CyclePlan = require('../models/CyclePlan');
 const { isComplete, GITHUB } = require('../services/logRule');
+const perf = require('../services/performance');
+const sv = require('../services/studentView');
 const router   = express.Router();
 
 function dayKey(d) {
@@ -65,8 +67,10 @@ router.get('/', protect, async (req, res) => {
   }
 });
 
-// GET /api/logs/oversight  — superadmin morning dashboard
-// Returns, per active-semester batch: last log date, logged-today flag, plan completion %
+// GET /api/logs/oversight  — the "Today" page, per active-semester batch, from its
+// CURRENT CYCLE (cycle plan + daily logs + holidays):
+//   classToday / holidayToday, loggedToday, classes due so far vs done,
+//   past classes with no log at all, next topic.
 router.get('/oversight', protect, async (req, res) => {
   try {
     const active = await Semester.findOne({ status: 'active' });
@@ -75,38 +79,62 @@ router.get('/oversight', protect, async (req, res) => {
     // Superadmin sees every batch; a trainer/co-trainer sees only their own.
     const batchFilter = { semester: active._id };
     if (req.user.role !== 'superadmin') batchFilter.trainers = req.user._id;
-    const batches = await Batch.find(batchFilter).populate('trainers', 'name');
-    const today = dayKey(new Date());
-
-    // All batches at once: plans and student counts in bulk, last log dates in parallel.
+    const batches = await Batch.find(batchFilter).populate('trainers', 'name').lean();
     const ids = batches.map(b => b._id);
-    const [plans, counts, lastLogs] = await Promise.all([
-      Plan.find({ batch: { $in: ids } }).select('batch topics.title topics.status').lean(),
+    const today = sv.todayIST();
+    const [cycles, counts, lastLogs] = await Promise.all([
+      Cycle.find({ batch: { $in: ids } }).select('batch number startDate endDate').sort('startDate').lean(),
       Student.aggregate([{ $match: { batch: { $in: ids } } }, { $group: { _id: '$batch', n: { $sum: 1 } } }]),
       // last log per batch: tiny index lookups sent together (one wait, not one per batch)
       Promise.all(ids.map(id => DailyLog.findOne({ batch: id }).sort('-date').select('batch date').lean())),
     ]);
-    const planOf = new Map(plans.map(p => [String(p.batch), p]));
+    // current cycle per batch: the one running today, else the next, else the latest
+    const cur = new Map();
+    for (const b of ids) {
+      const mine = cycles.filter(c => String(c.batch) === String(b));
+      cur.set(String(b), mine.find(c => perf.dayYmd(c.startDate) <= today && perf.dayYmd(c.endDate) >= today)
+        || mine.find(c => perf.dayYmd(c.startDate) > today) || mine[mine.length - 1] || null);
+    }
+    const live = [...cur.values()].filter(Boolean);
+    const from = live.reduce((m, c) => (perf.dayYmd(c.startDate) < m ? perf.dayYmd(c.startDate) : m), today);
+    const to = live.reduce((m, c) => (perf.dayYmd(c.endDate) > m ? perf.dayYmd(c.endDate) : m), today);
+    const [plans, logs, holOf] = await Promise.all([
+      CyclePlan.find({ cycle: { $in: live.map(c => c._id) } }).select('cycle classes.number classes.title classes.date').lean(),
+      live.length ? DailyLog.find({ batch: { $in: ids }, date: { $gte: perf.ymdToDay(from), $lte: perf.ymdToDay(to) } }).select('batch date status').lean() : [],
+      sv.holidayFinder(from, to),
+    ]);
+    const planOf = new Map(plans.map(p => [String(p.cycle), p]));
     const countOf = new Map(counts.map(c => [String(c._id), c.n]));
     const lastOf = new Map(lastLogs.filter(Boolean).map(x => [String(x.batch), x]));
     const rows = batches.map((b) => {
+      const c = cur.get(String(b._id));
+      const logBy = new Map(logs.filter(l => String(l.batch) === String(b._id)).map(l => [perf.dayYmd(l.date), l]));
+      const classes = (c && planOf.get(String(c._id))?.classes || [])
+        .filter(k => k.date && k.date >= perf.dayYmd(c.startDate) && k.date <= perf.dayYmd(c.endDate) && !holOf(b._id, k.date))
+        .sort((x, y) => x.date.localeCompare(y.date) || x.number - y.number);
+      const k0 = classes.find(k => k.date === today);
+      const loggedToday = logBy.has(today);
+      const due = classes.filter(k => k.date < today || (k.date === today && loggedToday));
+      const done = due.filter(k => logBy.get(k.date)?.status === 'done').length;
+      const notLoggedDays = classes.filter(k => k.date < today && !logBy.has(k.date)).length;
+      const next = (!loggedToday && k0) || classes.find(k => k.date > today);
       const lastLog = lastOf.get(String(b._id)) || null;
-      const loggedToday = !!lastLog && dayKey(lastLog.date).getTime() === today.getTime();
-      const plan = planOf.get(String(b._id));
-      const totalTopics = plan ? plan.topics.length : 0;
-      const doneTopics  = plan ? plan.topics.filter(t => t.status === 'done').length : 0;
-      const nextTopic   = plan ? (plan.topics.find(t => t.status !== 'done')?.title || '— plan complete —') : '— no plan —';
       return {
         batchId: b._id, batchName: b.name, track: b.track,
-        trainers: b.trainers.map(t => t.name),
+        trainers: (b.trainers || []).map(t => t.name),
+        cycle: c ? { id: c._id, number: c.number } : null,
+        classToday: k0 ? { number: k0.number, title: k0.title || '' } : null,
+        holidayToday: holOf(b._id, today),
         lastLogDate: lastLog ? lastLog.date : null,
         loggedToday,
-        planPct: totalTopics ? Math.round((doneTopics / totalTopics) * 100) : 0,
-        doneTopics, totalTopics, nextTopic,
+        doneTopics: done, totalTopics: due.length, classesInCycle: classes.length,
+        planPct: due.length ? Math.round(done / due.length * 100) : 100,
+        notLoggedDays,
+        nextTopic: !c || !classes.length ? '— no plan —' : next ? (next.title || `Class ${next.number} — topic not typed yet`) : '— cycle plan done —',
         studentCount: countOf.get(String(b._id)) || 0,
       };
     });
-    res.json({ semester: { _id: active._id, name: active.name }, rows });
+    res.json({ semester: { _id: active._id, name: active.name }, today, rows });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

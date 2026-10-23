@@ -113,8 +113,14 @@ async function studentHome(s) {
       trainers: trainers.map(t => ({ id: t._id, name: t.name, done: given.some(g => String(g.trainer) === String(t._id)) })) });
   }
 
+  // Hall of Fame finishes (every cycle where the student is in the Top 3)
+  const tops = await Cycle.find({ 'report.top3.student': s._id }).select('number report.top3.rank report.top3.student').sort('startDate').lean();
+  const achievements = tops.map(c => ({ cycle: c.number, rank: c.report.top3.find(t => String(t.student) === String(s._id))?.rank }));
+  const photo = s.photo?.data ? `data:${s.photo.contentType};base64,${s.photo.data}` : null;
+
   return {
-    student: { id: s._id, name: s.name, roll: s.roll, github: s.github || '', course: s.course, sem: s.sem, section: s.section },
+    student: { id: s._id, name: s.name, roll: s.roll, github: s.github || '', course: s.course, sem: s.sem, section: s.section, photo },
+    achievements,
     batch: { id: batch?._id, name: batch?.name, track: batch?.track || '', trainers: trainers.map(t => t.name) },
     today,
     attendance: { present: s.stats?.presentCount || 0, total: s.stats?.totalSessions || 0,
