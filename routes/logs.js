@@ -4,7 +4,7 @@ const Plan     = require('../models/Plan');
 const Batch    = require('../models/Batch');
 const Student  = require('../models/Student');
 const Semester = require('../models/Semester');
-const { protect, canAccessBatch, noCotrainer } = require('../middleware/auth');
+const { protect, canAccessBatch, noCotrainer, seesAll } = require('../middleware/auth');
 const Cycle     = require('../models/Cycle');
 const CyclePlan = require('../models/CyclePlan');
 const { isComplete, GITHUB } = require('../services/logRule');
@@ -18,37 +18,8 @@ function dayKey(d) {
   return dt;
 }
 
-// Sessions that count towards attendance: logs where the roll call was actually
-// taken. Logs written before this field existed are treated as counted when
-// they carry attendance entries, so historical numbers don't move.
-const countsForAttendance = (log) =>
-  log.attendanceTaken || (Array.isArray(log.attendance) && log.attendance.length > 0);
-
-// Recompute presentCount/totalSessions for every student in a batch.
-// One bulkWrite instead of one save() per student — this used to fire 145
-// sequential writes every time a trainer saved a daily log.
-async function recomputeBatchStats(batchId) {
-  const logs = (await DailyLog.find({ batch: batchId })).filter(countsForAttendance);
-  const totalSessions = logs.length;
-  const presentMap = {}; // studentId -> present count
-  for (const log of logs) {
-    for (const a of log.attendance) {
-      const id = a.student.toString();
-      presentMap[id] = (presentMap[id] || 0) + (a.present ? 1 : 0);
-    }
-  }
-  const students = await Student.find({ batch: batchId }).select('_id');
-  if (!students.length) return;
-  await Student.bulkWrite(students.map(s => ({
-    updateOne: {
-      filter: { _id: s._id },
-      update: { $set: {
-        'stats.totalSessions': totalSessions,
-        'stats.presentCount':  presentMap[s._id.toString()] || 0,
-      } },
-    },
-  })));
-}
+// Attendance counters per student: services/attendanceStats.js
+const { recomputeBatchStats, countsForAttendance } = require('../services/attendanceStats');
 
 // GET /api/logs?batch=ID   or   ?semester=ID   (recent logs)
 router.get('/', protect, async (req, res) => {
@@ -78,7 +49,7 @@ router.get('/oversight', protect, async (req, res) => {
 
     // Superadmin sees every batch; a trainer/co-trainer sees only their own.
     const batchFilter = { semester: active._id };
-    if (req.user.role !== 'superadmin') batchFilter.trainers = req.user._id;
+    if (!seesAll(req.user)) batchFilter.trainers = req.user._id;
     const batches = await Batch.find(batchFilter).populate('trainers', 'name').lean();
     const ids = batches.map(b => b._id);
     const today = sv.todayIST();

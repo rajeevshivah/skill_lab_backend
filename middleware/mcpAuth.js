@@ -1,5 +1,7 @@
 const ApiToken = require('../models/ApiToken');
 const User     = require('../models/User');
+const tenant   = require('../services/tenant');
+const { roleIn, asRequestUser } = require('./auth');
 
 // Auth for the /mcp endpoint.
 //
@@ -41,12 +43,14 @@ exports.mcpAuth = async (req, res, next) => {
     if (!plain || !plain.startsWith(ApiToken.TOKEN_PREFIX))
       return deny(res, 401, 'Missing Skill Lab MCP token. Generate one under "Connect AI" in the Skill Lab app.');
 
-    const token = await ApiToken.findOne({ hash: ApiToken.hashToken(plain) });
+    // the token decides the college (AI apps call from no college web address)
+    const token = await ApiToken.findOne({ hash: ApiToken.hashToken(plain) }).setOptions({ allOrgs: true });
     if (!token || !token.isUsable())
       return deny(res, 401, 'This token is invalid, revoked or expired. Generate a new one under "Connect AI".');
 
     const user = await User.findById(token.user).select('-password');
-    if (!user || !user.isActive)
+    const role = roleIn(user, token.org);
+    if (!role)
       return deny(res, 401, 'The account behind this token is inactive.');
 
     if (rateLimited(token._id.toString()))
@@ -54,12 +58,17 @@ exports.mcpAuth = async (req, res, next) => {
 
     // Record last use at most once a minute (avoids a write on every call).
     if (!token.lastUsedAt || Date.now() - token.lastUsedAt.getTime() > 60 * 1000) {
-      ApiToken.updateOne({ _id: token._id }, { lastUsedAt: new Date() }).catch(() => {});
+      ApiToken.updateOne({ _id: token._id }, { lastUsedAt: new Date() }).setOptions({ allOrgs: true }).catch(() => {});
     }
 
-    req.user = user;
+    const org = await require('./org').load().then(c => c.byId.get(String(token.org)));
+    if (!org) return deny(res, 401, 'This token is not linked to a college.');
+    if (org.status === 'suspended') return deny(res, 403, `${org.name}'s subscription is paused.`);
+    if (org.modules?.ai === false) return deny(res, 403, `${org.name} has not switched on AI connections.`);
+    req.org = org;
+    req.user = asRequestUser(user, role, org._id);
     req.apiToken = token;
-    next();
+    tenant.run(org._id, next);
   } catch (err) {
     return deny(res, 500, 'Auth check failed');
   }

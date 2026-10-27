@@ -19,7 +19,8 @@ async function activeSemester(res) {
 const input = (b) => ({
   from: b.from, to: b.to || b.from, title: String(b.title || 'Holiday').slice(0, 80),
   batchIds: (b.batchIds || []).filter(x => mongoose.isValidObjectId(x)),
-  mode: b.mode === 'mark' ? 'mark' : 'shift',
+  mode: ['mark', 'keep', 'makeup'].includes(b.mode) ? b.mode : 'shift',
+  makeupDate: b.makeupDate || null,
 });
 
 // GET /api/settings/timetables
@@ -48,8 +49,8 @@ router.get('/holidays', protect, async (req, res) => {
   try {
     const sem = await activeSemester(res); if (!sem) return;
     const hs = await Holiday.find({ semester: sem._id }).sort('from').populate('batches', 'name').populate('createdBy', 'name').lean();
-    res.json({ holidays: hs.map(h => ({ _id: h._id, from: h.from, to: h.to, title: h.title, mode: h.mode,
-      batches: (h.batches || []).map(b => b.name), moved: h.moves.length, cycleChanges: h.cycleChanges.length,
+    res.json({ holidays: hs.map(h => ({ _id: h._id, from: h.from, to: h.to, title: h.title, mode: h.mode, makeupDate: h.makeupDate || null,
+      batches: (h.batches || []).map(b => b.name), moved: h.moves.length, merged: (h.merges || []).length, cycleChanges: h.cycleChanges.length,
       by: h.createdBy?.name || '', at: h.createdAt })) });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -67,7 +68,7 @@ router.post('/holidays', protect, superadminOnly, async (req, res) => {
   try {
     const sem = await activeSemester(res); if (!sem) return;
     const r = await cal.apply(input(req.body), sem, req.user);
-    res.status(201).json({ ok: true, holidayId: r.holiday._id, moved: r.holiday.moves.length, cycleChanges: r.holiday.cycleChanges.length });
+    res.status(201).json({ ok: true, holidayId: r.holiday._id, moved: r.holiday.moves.length, merged: (r.holiday.merges || []).length, cycleChanges: r.holiday.cycleChanges.length });
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
@@ -77,6 +78,34 @@ router.delete('/holidays/:id', protect, superadminOnly, async (req, res) => {
     const r = await cal.remove(req.params.id, req.user);
     res.json({ ok: true, skipped: r.skipped });
   } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+// ── Top students: score weights and label cut-offs (Organization.settings) ──
+const Organization = require('../models/Organization');
+const tenant = require('../services/tenant');
+const top = require('../services/topStudents');
+
+// GET /api/settings/student-score
+router.get('/student-score', protect, async (req, res) => {
+  try { res.json({ studentScore: await top.weights(), defaults: top.DEFAULTS }); }
+  catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// PUT /api/settings/student-score { marks, attendance, projects, good, excellent }
+router.put('/student-score', protect, superadminOnly, async (req, res) => {
+  try {
+    const v = {};
+    for (const k of Object.keys(top.DEFAULTS)) {
+      const n = Number(req.body?.[k]);
+      if (!Number.isFinite(n) || n < 0 || n > 100) return res.status(400).json({ message: `${k} must be a number from 0 to 100.` });
+      v[k] = Math.round(n);
+    }
+    if (!(v.marks + v.attendance + v.projects)) return res.status(400).json({ message: 'At least one weight must be above 0.' });
+    if (v.good > v.excellent) return res.status(400).json({ message: '"Good" cut-off cannot be above "Excellent".' });
+    await Organization.updateOne({ _id: tenant.currentOrg() }, { $set: { 'settings.studentScore': v } });
+    require('../middleware/org').forget();
+    res.json({ studentScore: v });
+  } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 module.exports = router;

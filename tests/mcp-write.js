@@ -47,6 +47,7 @@ async function previewAndConfirm(c, name, args) {
   const mongod = process.env.TEST_MONGO_URI ? null : await MongoMemoryServer.create();
   await mongoose.connect(process.env.TEST_MONGO_URI || mongod.getUri());
   if (process.env.TEST_MONGO_URI) await mongoose.connection.dropDatabase();
+  const college = await require('./college').setup();
 
   const app = express(); app.use(express.json());
   app.use('/api/tokens', require('../routes/tokens'));
@@ -85,7 +86,7 @@ async function previewAndConfirm(c, name, args) {
   console.log('\n1. Tool list');
   const { tools } = await cS.listTools();
   const W = ['fill_cycle_report', 'update_cycle_marks', 'set_cycle_top3', 'save_daily_log', 'save_cycle_plan_class'];
-  ok('trainer sees 33 tools', tools.length === 33, tools.length);
+  ok('trainer sees 35 tools', tools.length === 35, tools.length);
   ok('write tools are NOT marked read-only', W.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === false));
   const READ = ['whoami','search','list_batches','get_batch_roster','list_cycles','get_cycle_marks','get_cycle_plan','get_daily_logs','get_student_profile','get_today_overview','get_hall_of_fame'];
   ok('read tools still read-only', READ.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === true));

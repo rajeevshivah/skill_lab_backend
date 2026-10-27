@@ -9,4 +9,5 @@ const semesterSchema = new mongoose.Schema({
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 
+semesterSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('Semester', semesterSchema);

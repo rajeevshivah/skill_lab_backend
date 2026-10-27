@@ -16,6 +16,8 @@ const crypto = require('crypto');
 const { z }  = require('zod');
 
 const User     = require('../models/User');
+const Organization = require('../models/Organization');
+const tenant   = require('../services/tenant');
 const Semester = require('../models/Semester');
 const Batch    = require('../models/Batch');
 const Student  = require('../models/Student');
@@ -35,17 +37,25 @@ const anyone = (t) => adminTools.push(t);
 const rx = (s) => new RegExp(String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
 
 // Find ONE user by id, exact email, or (unique) part of the name.
+// role / active as they are in THIS college (a person may work for several)
+function withRole(u) {
+  const m = u.membershipIn(tenant.currentOrg());
+  u.role = m?.role || u.role;
+  u.isActive = !!(u.isActive && m?.isActive);
+  return u;
+}
 async function findUser(ref) {
   const r = String(ref || '').trim();
   if (!r) throw new ToolError('Say which user (email or name).');
-  if (/^[a-f0-9]{24}$/i.test(r)) { const u = await User.findById(r).select('-password'); if (u) return u; }
+  const here = User.inOrg(tenant.currentOrg());   // only people of this college
+  if (/^[a-f0-9]{24}$/i.test(r)) { const u = await User.findOne({ _id: r, ...here }).select('-password'); if (u) return withRole(u); }
   if (r.includes('@')) {
-    const u = await User.findOne({ email: r.toLowerCase() }).select('-password');
-    if (!u) throw new ToolError(`No user with email ${r}.`);
-    return u;
+    const u = await User.findOne({ email: r.toLowerCase(), ...here }).select('-password');
+    if (!u) throw new ToolError(`No user with email ${r} in this college.`);
+    return withRole(u);
   }
-  const m = await User.find({ name: rx(r) }).select('-password');
-  if (m.length === 1) return m[0];
+  const m = await User.find({ name: rx(r), ...here }).select('-password');
+  if (m.length === 1) return withRole(m[0]);
   throw new ToolError(m.length
     ? `"${r}" matches several users: ${m.map(u => `${u.name} <${u.email}>`).join(', ')}. Use the email.`
     : `No user named "${r}". Use list_users to see everyone.`);
@@ -79,6 +89,12 @@ function tempPassword() {
   return `${p.slice(0, 4)}-${p.slice(4, 8)}-${p.slice(8)}`;
 }
 
+// This college's sign-in page (its first web address).
+async function loginUrl() {
+  const o = await Organization.findById(tenant.currentOrg()).select('hosts').lean();
+  const h = o?.hosts?.find(x => x.includes('.') && !/^\d/.test(x));
+  return h ? `https://${h}/login` : '(your college web address)/login';
+}
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('YYYY-MM-DD');
 const PW_NOTE = 'Share this password with them privately (not in a group). They can be given a new one any time with update_user reset_password.';
 
@@ -90,7 +106,9 @@ admin({
   description: 'Superadmin only. All Skill Lab users with role, active status, and the batches each one is assigned to in the active semester.',
   input: { include_inactive: z.boolean().optional().describe('Default true') },
   async handler({ include_inactive = true }) {
-    const users = await User.find(include_inactive ? {} : { isActive: true }).select('-password').sort('name');
+    const org = tenant.currentOrg();
+    const users = (await User.find(User.inOrg(org)).select('-password').sort('name')).map(withRole)
+      .filter(u => include_inactive || u.isActive);
     const active = await Semester.findOne({ status: 'active' });
     const batches = await Batch.find(active ? { semester: active._id } : {}).select('name trainers');
     return {
@@ -118,7 +136,14 @@ admin(writeTool({
     const email = args.email.trim().toLowerCase();
     const role = args.role || 'trainer';
     const exists = await User.findOne({ email });
-    if (exists) throw new ToolError(`${email} already has an account (${exists.name}, ${exists.isActive ? 'active' : 'inactive'}). Use update_user instead.`);
+    if (exists && exists.membershipIn(tenant.currentOrg()))
+      throw new ToolError(`${email} already has an account here (${exists.name}). Use update_user instead.`);
+    if (exists) return {
+      summary: `Give ${exists.name} <${email}> (already has a login for another college) the ${role} role here`,
+      changes: { email, role, password: 'unchanged — they keep their own password' }, warnings: [],
+      apply: async () => ({ user: unwrap(await ctx.api('POST', '/api/auth/create-user', { name: exists.name, email, password: tempPassword(), role })).user,
+        note: 'They sign in here with the password they already have.', loginUrl: await loginUrl() }),
+    };
     const warnings = role === 'superadmin' ? ['A superadmin can see and change EVERYTHING, including other users.'] : [];
     return {
       summary: `Create ${role} account for ${args.name.trim()} <${email}>`,
@@ -127,7 +152,7 @@ admin(writeTool({
       apply: async () => {
         const password = tempPassword();
         const out = unwrap(await ctx.api('POST', '/api/auth/create-user', { name: args.name.trim(), email, password, role }));
-        return { user: out.user, temporaryPassword: password, note: PW_NOTE, loginUrl: 'https://skilllab.sheat.ac.in/login' };
+        return { user: out.user, temporaryPassword: password, note: PW_NOTE, loginUrl: await loginUrl() };
       },
     };
   },
@@ -670,12 +695,71 @@ admin(writeTool({
     if (!s) throw new ToolError('Student not found.');
     const to = await findBatch(args.to_batch_id);
     if (String(s.batch?._id) === String(to._id)) throw new ToolError(`${s.name} is already in ${to.name}.`);
-    const clash = s.roll ? await Student.findOne({ batch: to._id, roll: s.roll }) : null;
+    const clash = s.roll ? await Student.findOne({ batch: to._id, roll: new RegExp(`^\\s*${s.roll.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i') }) : null;
+    if (clash) throw new ToolError(`${to.name} already has roll ${s.roll} (${clash.name}). If they are the same person, use merge_students.`);
     return {
       summary: `Move ${s.name} (${s.roll}) → ${to.name}`,
       changes: { from: s.batch?.name, to: to.name },
-      warnings: clash ? [`${to.name} already has roll ${s.roll} (${clash.name}) — this will create a duplicate.`] : [],
+      warnings: [],
       apply: async () => { unwrap(await ctx.api('POST', `/api/students/${s._id}/move`, { batch: to._id })); return { movedTo: to.name }; },
+    };
+  },
+}));
+
+admin({
+  name: 'list_duplicate_students',
+  title: 'Find duplicate roll numbers',
+  description: 'Superadmin only. Roll numbers that appear more than once in the active semester — inside one batch (a double import: ' +
+    'merge them with merge_students) or across batches (same student in two tracks). Shows names, marks and attendance per record.',
+  input: {},
+  async handler(args, me, ctx) {
+    const sem = await Semester.findOne({ status: 'active' });
+    const out = unwrap(await ctx.api('GET', `/api/students/duplicates${sem ? `?semester=${sem._id}` : ''}`));
+    return { semester: sem?.name || null, count: out.count, groups: out.groups };
+  },
+});
+
+admin(writeTool({
+  name: 'merge_students',
+  title: 'Merge two records of the same student',
+  description: 'Superadmin only. When one student was added twice to the SAME batch (same roll, maybe a misspelt name), move everything ' +
+    'from the duplicate record — marks, attendance, class check-ins, project submissions, feedback votes, Top-3 places, sign-in, photo — ' +
+    'to the record you keep, then remove the duplicate. Where both have a mark for the same cycle, the evaluated one wins; attendance: present wins. ' +
+    'Cannot be undone. Use list_duplicate_students to find pairs.',
+  input: { keep_student_id: z.string().describe('The record to keep (correct name)'), duplicate_student_id: z.string().describe('The record to remove') },
+  async plan(args, me, ctx) {
+    requireId(args.keep_student_id, 'student'); requireId(args.duplicate_student_id, 'student');
+    const p = unwrap(await ctx.api('POST', `/api/students/${args.duplicate_student_id}/merge`, { into: args.keep_student_id, preview: true }));
+    const warnings = ['This cannot be undone.'];
+    if (p.keep.name.trim().toLowerCase() !== p.drop.name.trim().toLowerCase()) warnings.push(`Names differ: keeping "${p.keep.name}", removing "${p.drop.name}". Make sure they are the same person.`);
+    if (p.keep.roll.trim().toLowerCase() !== p.drop.roll.trim().toLowerCase()) warnings.push(`Roll numbers differ (${p.keep.roll} / ${p.drop.roll}).`);
+    return {
+      summary: `Merge ${p.drop.name} (${p.drop.roll}) into ${p.keep.name} (${p.keep.roll})`,
+      changes: { keep: p.keep, remove: p.drop, moves: p.moves }, warnings,
+      apply: async () => unwrap(await ctx.api('POST', `/api/students/${args.duplicate_student_id}/merge`, { into: args.keep_student_id })),
+    };
+  },
+}));
+
+admin(writeTool({
+  name: 'set_top_student_rules',
+  title: 'Change how top students are scored',
+  description: 'Superadmin only. Weights (0–100) of the top-student score — marks, attendance, projects — and the score cut-offs for ' +
+    'the "Good" and "Excellent" labels. Weights are relative (60/25/15 = 12/5/3). Leave out what should stay the same.',
+  input: {
+    marks: z.number().min(0).max(100).optional(), attendance: z.number().min(0).max(100).optional(), projects: z.number().min(0).max(100).optional(),
+    good: z.number().min(0).max(100).optional(), excellent: z.number().min(0).max(100).optional(),
+  },
+  async plan(args, me, ctx) {
+    const now = unwrap(await ctx.api('GET', '/api/settings/student-score')).studentScore;
+    const next = { ...now };
+    const changes = [];
+    for (const k of ['marks', 'attendance', 'projects', 'good', 'excellent'])
+      if (args[k] !== undefined && args[k] !== now[k]) { next[k] = args[k]; changes.push({ field: k, from: now[k], to: args[k] }); }
+    if (!changes.length) throw new ToolError('Nothing to change.');
+    return {
+      summary: 'Change top-student scoring', changes, warnings: [],
+      apply: async () => unwrap(await ctx.api('PUT', '/api/settings/student-score', next)),
     };
   },
 }));

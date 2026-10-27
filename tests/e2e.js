@@ -31,6 +31,7 @@ const step = (t) => console.log('\n— ' + t);
   }
   await mongoose.connect(process.env.TEST_MONGO_URI || mongod.getUri());
   if (process.env.TEST_MONGO_URI) await mongoose.connection.dropDatabase();
+  const college = await require('./college').setup();
   for (const n of ['User', 'Semester', 'Batch', 'Student', 'Cycle', 'CyclePlan', 'CycleMark', 'DailyLog', 'Holiday', 'ClassPulse', 'ProjectSubmission', 'MeetingNote']) await require('../models/' + n).init();
 
   // ── simulated clock (India time) ──
@@ -298,6 +299,26 @@ const step = (t) => console.log('\n— ' + t);
   at('2027-01-20', '12:00');
   ok('Deepu fills his report', (await http('PUT', `/api/cycles/${cA._id}/report`, { token: T(deepu), body: { problemsFaced: 'power cut', performanceRating: 3 } })).status === 200);
 
+  step('Class health: one view of every class, with filters');
+  at('2027-01-21', '10:00');
+  r = await http('GET', `/api/meeting/health?from=2027-01-04&to=2027-01-18&batches=${A._id}`, { token: T(lucky) });
+  const hA = r.body.batches?.[0];
+  const st = (d) => hA.classes.find(c => c.date === d);
+  ok('only the filtered batch', r.status === 200 && r.body.batches.length === 1 && hA.batch === 'Full Stack', r.body);
+  ok('4 Jan: done, on time, attendance 5/6', st('2027-01-04').state === 'done' && st('2027-01-04').log.onTime && st('2027-01-04').attendance.present === 5, st('2027-01-04'));
+  ok('5 Jan: late log flagged', st('2027-01-05').flags.includes('late log'));
+  ok('6 + 12 Jan: holidays', st('2027-01-06')?.state === 'holiday' && st('2027-01-12')?.state === 'holiday', hA.classes.map(c => c.date + ':' + c.state));
+  ok('7 Jan: students disagree flagged', st('2027-01-07').flags.includes('students disagree'));
+  ok('8 Jan: not logged', st('2027-01-08').state === 'missing' && st('2027-01-08').flags.includes('not logged'));
+  ok('11 Jan: completed the next day = late', st('2027-01-11').flags.includes('late log') && st('2027-01-11').log.complete);
+  ok('summary counts', hA.summary.missing === 1 && hA.summary.disagree === 1 && hA.summary.holidays === 2 && hA.summary.answers > 0, hA.summary);
+  r = await http('GET', `/api/meeting/health?from=2027-01-04&to=2027-01-18&trainer=${deepu._id}`, { token: T(admin) });
+  ok('trainer filter: only Deepu\'s batch', r.body.batches.length === 1 && r.body.batches[0].batch === 'Full Stack');
+  r = await http('GET', '/api/meeting/health?from=2027-01-04&to=2027-01-18', { token: T(lucky) });
+  ok('everyone sees all batches; own ones marked', r.body.batches.length === 2 && r.body.batches.find(b => b.batch === 'BCA 1st').mine && !r.body.batches.find(b => b.batch === 'Full Stack').mine);
+  ok('cycle periods offered as quick picks', r.body.periods.length >= 1 && r.body.periods[0].start === '2027-01-04', r.body.periods);
+  ok('over 120 days refused', (await http('GET', '/api/meeting/health?from=2027-01-01&to=2027-06-30', { token: T(lucky) })).status === 400);
+
   step('Performance + cycle review meeting');
   at('2027-01-21', '11:00');
   r = await http('GET', '/api/performance', { token: T(admin) });
@@ -309,6 +330,9 @@ const step = (t) => console.log('\n— ' + t);
   ok('Full Stack logs: late, incomplete-then-late, missing counted', pfA && pfA.items.logs.late >= 2 && pfA.items.logs.missing === 1, pfA?.items?.logs);
   ok('holidays never become class days (9 class days: 6 & 12 Jan left out)', pfA && pfA.items.logs.days === 9, pfA?.items?.logs);
   ok('Lucky scores higher than Deepu', pfA && pfB && pfB.score > pfA.score, `${pfB?.score} vs ${pfA?.score}`);
+  const tr = (await http('GET', '/api/performance', { token: T(admin) })).body.trainers;
+  const tD = tr.find(x => x.name === 'Deepu');
+  ok('trainer pop-up data: history per cycle + warning signs', tD && tD.history.length >= 1 && tD.history[0].items.logs && tD.signs.logsMissing === 1 && tD.signs.logsLate >= 2, JSON.stringify(tD && { h: tD.history.length, s: tD.signs }));
   r = await http('GET', `/api/meeting/review?period=${r.body.periods[0].key}`, { token: T(admin) });
   ok('cycle review lists trainers with facts', r.status === 200 && r.body.trainers.length >= 1, r.body);
   const all = [];
@@ -323,10 +347,13 @@ const step = (t) => console.log('\n— ' + t);
   ok('closed cycle report is frozen', (await http('PUT', `/api/cycles/${cA._id}/report`, { token: T(deepu), body: { reflection: 'x' } })).status === 400);
   r = await http('GET', '/api/student/me', { token: await stok(SA[3]) });
   ok('student sees cycle 1 marks on their page', JSON.stringify(r.body?.history || r.body?.marks || '').includes('185'), r.body?.history || r.body?.marks);
-  r = await http('GET', '/api/students/placement', { token: T(admin) });
+  r = await http('GET', '/api/students/top', { token: T(admin) });
   const divya = (r.body.students || []).find(s => s.roll === 'A103');
-  ok('placement: Top 3 finish counted for the topper', divya?.stats?.topperCount === 1, divya?.stats);
-  ok('placement: submitted projects counted', divya?.stats?.projectCount === 1, divya?.stats);
+  ok('top students: Top 3 finish counted for the topper', divya?.top3 === 1, divya);
+  ok('top students: submitted project counted', divya?.projectsSubmitted === 1 && divya?.projectsDue === 1, divya);
+  ok('top students: topper is labelled Good or Excellent', !!divya?.tier && divya.score >= 65, divya);
+  r = await http('GET', '/api/students/top', { token: T(deepu) });
+  ok('top students: a trainer sees only own batches', r.body.students.length > 0 && r.body.students.every(s => s.batch.name === 'Full Stack'), r.body.batches);
   r = await http('GET', `/api/toppers?batch=${A._id}`, { token: T(deepu) });
   ok('batch Toppers tab shows the cycle Top 3', JSON.stringify(r.body).includes('A103'), r.body);
 

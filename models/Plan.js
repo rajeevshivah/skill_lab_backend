@@ -16,4 +16,5 @@ const planSchema = new mongoose.Schema({
   updatedBy:{ type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 
+planSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('Plan', planSchema);

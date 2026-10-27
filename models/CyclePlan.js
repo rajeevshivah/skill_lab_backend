@@ -29,4 +29,5 @@ const cyclePlanSchema = new mongoose.Schema({
 
 cyclePlanSchema.index({ batch: 1 });
 
+cyclePlanSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('CyclePlan', cyclePlanSchema);

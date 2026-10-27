@@ -120,4 +120,5 @@ const cycleSchema = new mongoose.Schema({
 cycleSchema.index({ batch: 1, number: 1 }, { unique: true });
 cycleSchema.index({ semester: 1 });
 
+cycleSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('Cycle', cycleSchema);

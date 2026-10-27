@@ -36,6 +36,7 @@ const ymd = (d) => perf.dayYmd(d);
   }
   await mongoose.connect(process.env.TEST_MONGO_URI || mongod.getUri());
   if (process.env.TEST_MONGO_URI) await mongoose.connection.dropDatabase();
+  const college = await require('./college').setup();
 
   const app = express(); app.use(express.json({ limit: '5mb' }));
   app.use('/api/cycles', require('../routes/cycles'));

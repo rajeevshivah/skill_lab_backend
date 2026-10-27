@@ -12,6 +12,13 @@
 //      Saturday after the new project day. Refused if that would run into the
 //      batch's next cycle. Classes already held (a log exists) never move.
 //    mode 'mark'  — nothing moves; classes on those days are flagged for re-planning.
+//    mode 'keep'  — like 'shift', but the project day (and the cycle end) stay put:
+//      classes move forward up to the day before the project day, and a class
+//      that no longer fits is MERGED into the last class before it (titles
+//      joined "A + B", notes kept). Refused if no class day is left.
+//    mode 'makeup' — one day off whose classes happen on another date instead
+//      (e.g. Monday's classes held on Saturday): only that day's classes move,
+//      to makeupDate (any weekday, inside the same cycle). Nothing else moves.
 //  Either way holiday days are not counted for logs/scores, students get no
 //  "did we cover it?" question, and the board shows the holiday.
 //  Removing a holiday undoes its moves (only where nobody changed them since).
@@ -59,9 +66,16 @@ async function holidayMap(batchId, semesterId, { excludeId = null } = {}) {
 }
 
 // What marking this holiday would change. Nothing is saved.
-async function preview({ from, to, title, batchIds, mode }, semester, { excludeId = null } = {}) {
+const MODES = ['shift', 'mark', 'keep', 'makeup'];
+async function preview({ from, to, title, batchIds, mode, makeupDate }, semester, { excludeId = null } = {}) {
   if (!isYmd(from)) throw new Error('Pick the first holiday date.');
   to = isYmd(to) ? to : from;
+  mode = MODES.includes(mode) ? mode : 'shift';
+  if (mode === 'makeup') {
+    if (to !== from) throw new Error('A make-up day replaces ONE day off. Pick a single day.');
+    if (!isYmd(makeupDate)) throw new Error('Pick the date the classes happen instead.');
+    if (makeupDate === from) throw new Error('The make-up day must be a different day.');
+  }
   if (to < from) throw new Error('The last day must be on or after the first day.');
   if (rangeDays(from, to).length > 31) throw new Error('A holiday can be at most 31 days long.');
   const all = await Batch.find({ semester: semester._id, ...(batchIds?.length ? { _id: { $in: batchIds } } : {}) }).lean();
@@ -72,7 +86,7 @@ async function preview({ from, to, title, batchIds, mode }, semester, { excludeI
     const hol = await holidayMap(b._id, semester._id, { excludeId });
     for (const d of range) hol.set(d, title || 'Holiday');
     const cycles = await Cycle.find({ batch: b._id }).sort('startDate').lean();
-    const row = { batchId: b._id, batch: b.name, days: days.map(d => WD[d]), dayNums: days, source, moves: [], onHoliday: [], cycleChanges: [], conflict: null, note: '' };
+    const row = { batchId: b._id, batch: b.name, days: days.map(d => WD[d]), dayNums: days, source, moves: [], merges: [], onHoliday: [], cycleChanges: [], conflict: null, note: '' };
     const logs = await DailyLog.find({ batch: b._id, date: { $gte: perf.ymdToDay(from) } }).select('date status').lean();
     const held = new Set(logs.filter(l => l.status !== 'no-class').map(l => perf.dayYmd(l.date)));
     for (let ci = 0; ci < cycles.length; ci++) {
@@ -82,6 +96,17 @@ async function preview({ from, to, title, batchIds, mode }, semester, { excludeI
       const later = (plan?.classes || []).filter(k => isYmd(k.date) && k.date >= from && !held.has(k.date))
         .sort((a, b) => a.date.localeCompare(b.date) || a.number - b.number);
       if (!later.length) continue;
+      if (mode === 'makeup') {
+        const onDay = later.filter(k => k.date === from);
+        if (!onDay.length) continue;
+        const cs = perf.dayYmd(c.startDate), ce = perf.dayYmd(c.endDate);
+        if (makeupDate < cs || makeupDate > ce) { row.conflict = `${makeupDate} is outside Cycle ${c.number} (${cs} to ${ce}). Pick a day inside the cycle.`; break; }
+        if (hol.has(makeupDate)) { row.conflict = `${makeupDate} is itself a holiday (${hol.get(makeupDate)}).`; break; }
+        const clash = (plan.classes || []).find(k => k.date === makeupDate);
+        if (clash) { row.conflict = `${b.name} already has class ${clash.number} on ${makeupDate}.`; break; }
+        row.moves.push(...onDay.map(k => ({ cycleId: c._id, cycle: c.number, number: k.number, title: k.title, from: k.date, to: makeupDate })));
+        continue;
+      }
       if (mode !== 'mark' && days.length && source !== 'saved') {
         row.conflict = `Class days for ${b.name} are only guessed (${days.map(d => WD[d]).join(', ')}). Confirm them in Settings → Batch timetables first, so classes move to the right days.`;
         break;
@@ -89,6 +114,30 @@ async function preview({ from, to, title, batchIds, mode }, semester, { excludeI
       if (mode === 'mark' || !days.length) {
         for (const k of later) if (range.has(k.date)) row.onHoliday.push({ cycleId: c._id, cycle: c.number, number: k.number, title: k.title, date: k.date });
         if (mode !== 'mark' && !days.length && row.onHoliday.length) row.note = 'No timetable set for this batch — set it in Settings so classes can be moved.';
+        continue;
+      }
+      if (mode === 'keep') {
+        const pd = c.track?.projectDate ? perf.dayYmd(c.track.projectDate) : null, ce = perf.dayYmd(c.endDate);
+        if (pd && range.has(pd)) { row.conflict = `The project day of Cycle ${c.number} (${pd}) falls on this holiday. Pick "move everything forward", or change the project day first.`; break; }
+        const fits = (t) => pd ? t < pd : t <= ce;
+        const teaching = later.filter(k => pd ? k.date < pd : true);
+        let prev = null; const moves = [], kept = [], overflow = [];
+        for (const k of teaching) {
+          let t = prev && addDays(prev, 1) > k.date ? addDays(prev, 1) : k.date;
+          let guard = 0;
+          while ((!days.includes(wd(t)) || hol.has(t)) && guard++ < 120) t = addDays(t, 1);
+          if (!fits(t)) { overflow.push(k); continue; }
+          if (t !== k.date) moves.push({ cycleId: c._id, cycle: c.number, number: k.number, title: k.title, from: k.date, to: t });
+          kept.push({ k, t }); prev = t;
+        }
+        if (overflow.length) {
+          const target = kept.at(-1) || (plan.classes || []).filter(k => isYmd(k.date) && k.date < from && !(pd && k.date >= pd)).sort((a, b) => a.date.localeCompare(b.date)).map(k => ({ k, t: k.date })).at(-1);
+          if (!target) { row.conflict = `No class day is left before the project day in Cycle ${c.number}. Use "move forward" or re-plan by hand.`; break; }
+          row.merges.push({ cycleId: c._id, cycle: c.number, into: target.k.number, intoTitle: target.k.title, date: target.t,
+            removed: overflow.map(k => ({ number: k.number, title: k.title, date: k.date })) });
+          if (overflow.length > 1) row.note = `${overflow.length + 1} topics would be squeezed into class ${target.k.number}. That is a lot for one class: consider "move everything forward" or re-plan by hand.`;
+        }
+        row.moves.push(...moves);
         continue;
       }
       let prev = null; const moves = [];
@@ -122,30 +171,52 @@ async function preview({ from, to, title, batchIds, mode }, semester, { excludeI
     }
     out.push(row);
   }
-  return { from, to, title: title || 'Holiday', mode: mode === 'mark' ? 'mark' : 'shift', batches: out, ok: !out.some(r => r.conflict) };
+  return { from, to, title: title || 'Holiday', mode, makeupDate: mode === 'makeup' ? makeupDate : null, batches: out, ok: !out.some(r => r.conflict) };
 }
 
-// Move class dates through the plan store (history + row versions), as admin.
-async function writePlanDates(user, cycleId, changes, note) {
-  const r = await planStore.editPlan(user, cycleId, (list) => list.map(k => {
-    const m = changes.find(x => x.number === k.number && x.from === k.date);
-    return m ? { ...k, date: m.to } : k;
-  }), { skipLock: true, note });
-  if (r.status !== 200) throw new Error(r.body?.message || 'Could not move classes');
+// Move class dates (and, for mode keep, merge classes) through the plan store
+// (history + row versions), as admin. Returns what each merge removed/changed.
+async function writePlan(user, cycleId, changes, merges, note) {
+  const done = [];
+  const r = await planStore.editPlan(user, cycleId, (list) => {
+    let out = list.map(k => {
+      const m = changes.find(x => x.number === k.number && x.from === k.date);
+      return m ? { ...k, date: m.to } : k;
+    });
+    for (const g of merges || []) {
+      const target = out.find(k => k.number === g.into);
+      const gone = out.filter(k => g.removed.some(x => x.number === k.number));
+      if (!target || !gone.length) continue;
+      const rec = { into: g.into, prevTitle: target.title || '', prevNotes: target.notes || '',
+        removed: gone.map(k => ({ number: k.number, title: k.title || '', notes: k.notes || '', date: k.date || '', time: k.time || '', trainer: k.trainer?._id || k.trainer || null })) };
+      target.title = [target.title, ...gone.map(k => k.title)].filter(Boolean).join(' + ');
+      target.notes = [target.notes, ...gone.map(k => `[Merged from class ${k.number} (${note})]${k.title ? ' ' + k.title : ''}${k.notes ? '\n' + k.notes : ''}`)].filter(Boolean).join('\n\n');
+      rec.newTitle = target.title; rec.newNotes = target.notes;
+      out = out.filter(k => !gone.includes(k));
+      done.push(rec);
+    }
+    return out;
+  }, { skipLock: true, note });
+  if (r.status !== 200) throw new Error(r.body?.message || 'Could not change the plan');
+  return done;
 }
+const writePlanDates = (user, cycleId, changes, note) => writePlan(user, cycleId, changes, [], note);
 
 async function apply(input, semester, user) {
   const p = await preview(input, semester);
   if (!p.ok) throw new Error(p.batches.find(b => b.conflict).conflict);
-  const h = new Holiday({ semester: semester._id, from: p.from, to: p.to, title: p.title,
-    batches: input.batchIds?.length ? input.batchIds : [], mode: p.mode, createdBy: user._id, moves: [], cycleChanges: [] });
-  const label = `${p.title} (${p.from}${p.to !== p.from ? ' – ' + p.to : ''})`;
+  const h = new Holiday({ semester: semester._id, from: p.from, to: p.to, title: p.title, makeupDate: p.makeupDate,
+    batches: input.batchIds?.length ? input.batchIds : [], mode: p.mode, createdBy: user._id, moves: [], merges: [], cycleChanges: [] });
+  const label = `${p.title} (${p.from}${p.to !== p.from ? ' – ' + p.to : ''}${p.makeupDate ? ', held on ' + p.makeupDate : ''})`;
   for (const r of p.batches) {
     const byCycle = new Map();
-    for (const m of r.moves) { const k = String(m.cycleId); if (!byCycle.has(k)) byCycle.set(k, []); byCycle.get(k).push(m); }
-    for (const [cid, ms] of byCycle) {
-      await writePlanDates(user, cid, ms, `Holiday ${label}`);
-      for (const m of ms) h.moves.push({ cycle: cid, batch: r.batchId, number: m.number, from: m.from, to: m.to });
+    const slot = (k) => { if (!byCycle.has(k)) byCycle.set(k, { moves: [], merges: [] }); return byCycle.get(k); };
+    for (const m of r.moves) slot(String(m.cycleId)).moves.push(m);
+    for (const g of r.merges || []) slot(String(g.cycleId)).merges.push(g);
+    for (const [cid, w] of byCycle) {
+      const done = await writePlan(user, cid, w.moves, w.merges, `Holiday ${label}`);
+      for (const m of w.moves) h.moves.push({ cycle: cid, batch: r.batchId, number: m.number, from: m.from, to: m.to });
+      for (const d of done) h.merges.push({ cycle: cid, batch: r.batchId, ...d });
     }
     for (const ch of r.cycleChanges) {
       const c = await Cycle.findById(ch.cycleId);
@@ -166,6 +237,22 @@ async function remove(id, user) {
   const h = await Holiday.findById(id);
   if (!h) throw new Error('Holiday not found');
   const skipped = [];
+  // mode keep: split merged classes back out (only where nobody changed the merged class since)
+  const mergesBy = new Map();
+  for (const g of h.merges || []) { const k = String(g.cycle); if (!mergesBy.has(k)) mergesBy.set(k, []); mergesBy.get(k).push(g); }
+  for (const [cid, gs] of mergesBy) {
+    const r = await planStore.editPlan(user, cid, (list) => {
+      const out = list.map(k => ({ ...k }));
+      for (const g of gs) {
+        const t = out.find(k => k.number === g.into);
+        if (!t || (t.title || '') !== (g.newTitle || '') || (t.notes || '') !== (g.newNotes || '')) { skipped.push(`class ${g.into} (changed since — split it by hand)`); continue; }
+        t.title = g.prevTitle; t.notes = g.prevNotes;
+        for (const x of g.removed) if (!out.some(k => k.number === x.number)) out.push({ number: x.number, title: x.title, notes: x.notes, date: x.date, time: x.time, trainer: x.trainer });
+      }
+      return out;
+    }, { skipLock: true, note: `Holiday removed (${h.title})` });
+    if (r.status !== 200) skipped.push(`merged classes in one cycle (${r.body?.message || 'could not change'})`);
+  }
   const byCycle = new Map();
   for (const m of h.moves) { const k = String(m.cycle); if (!byCycle.has(k)) byCycle.set(k, []); byCycle.get(k).push({ number: m.number, from: m.to, to: m.from }); }
   for (const [cid, ms] of byCycle) {

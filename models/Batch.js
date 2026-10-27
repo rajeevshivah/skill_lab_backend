@@ -26,4 +26,5 @@ const batchSchema = new mongoose.Schema({
 
 batchSchema.index({ semester: 1, name: 1 }, { unique: true });
 
+batchSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('Batch', batchSchema);

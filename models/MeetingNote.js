@@ -25,4 +25,5 @@ meetingNoteSchema.index({ semester: 1, scope: 1, date: 1 });
 meetingNoteSchema.index({ semester: 1, scope: 1, period: 1 });
 meetingNoteSchema.index({ batch: 1, status: 1 });
 
+meetingNoteSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('MeetingNote', meetingNoteSchema);

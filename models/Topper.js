@@ -13,4 +13,5 @@ const topperSchema = new mongoose.Schema({
 // One rank per batch per cycle
 topperSchema.index({ batch: 1, cycle: 1, rank: 1 }, { unique: true });
 
+topperSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('Topper', topperSchema);

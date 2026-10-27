@@ -72,7 +72,7 @@ const req = async (method, path, { token, body } = {}) => {
 
   console.log('\n1. Endpoints require authentication');
   ok('GET /students without token → 401', (await req('GET','/api/students')).status === 401);
-  ok('GET /students/placement without token → 401', (await req('GET','/api/students/placement')).status === 401);
+  ok('GET /students/top without token → 401', (await req('GET','/api/students/top')).status === 401);
   ok('GET /batches without token → 401', (await req('GET','/api/batches')).status === 401);
   ok('GET /plans/:id without token → 401', (await req('GET',`/api/plans/${batch._id}`)).status === 401);
   ok('GET /students with token → 200', (await req('GET','/api/students',{token:T})).status === 200);

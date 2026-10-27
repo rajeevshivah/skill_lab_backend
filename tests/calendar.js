@@ -26,6 +26,7 @@ const planOf = async (cid) => Object.fromEntries((await CyclePlan.findOne({ cycl
   if (!process.env.TEST_MONGO_URI) { const { MongoMemoryServer } = require('mongodb-memory-server'); mongod = await MongoMemoryServer.create(); }
   await mongoose.connect(process.env.TEST_MONGO_URI || mongod.getUri());
   if (process.env.TEST_MONGO_URI) await mongoose.connection.dropDatabase();
+  const college = await require('./college').setup();
   const app = express(); app.use(express.json());
   app.use('/api/settings', require('../routes/settings'));
   app.use('/api/cycleplans', require('../routes/cycleplans'));
@@ -144,6 +145,60 @@ const planOf = async (cid) => Object.fromEntries((await CyclePlan.findOne({ cycl
   const st = await Student.create({ name: 'S', roll: '1', batch: lb._id, semester: sem._id });
   const home = await sv.studentHome(st);
   ok('student page shows the holiday', home.holidayToday === 'Fest' && home.cycle.classes.find(c => c.number === 2).holiday === 'Fest');
+
+  console.log('\n— keep the project day: classes move up to it, the one that no longer fits merges');
+  const kb = await Batch.create({ name: 'Keep', semester: sem._id, trainers: [lucky._id], schedule: { days: [1, 3] } });
+  const K = await Cycle.create({ batch: kb._id, semester: sem._id, number: 2, startDate: D('2027-03-01'), endDate: D('2027-03-12'),
+    track: { tracked: true, projectDate: D('2027-03-10') } });
+  const kcls = [[20, '2027-03-01'], [21, '2027-03-03'], [22, '2027-03-08'], [23, '2027-03-10']];
+  await CyclePlan.create({ cycle: K._id, batch: kb._id, semester: sem._id, classes: kcls.map(([n, d]) => ({ number: n, title: 'K' + n, notes: 'n' + n, date: d })) });
+  const kbody = { from: '2027-03-01', title: 'College closed', batchIds: [String(kb._id)], mode: 'keep' };
+  r = await http('POST', '/api/settings/holidays/preview', { token: T(admin), body: kbody });
+  let kr = r.body.batches[0];
+  ok('preview: 20→3 Mar, 21→8 Mar, 22 merges into 21, project row stays', kr.moves.map(m => `${m.number}:${m.to}`).join() === '20:2027-03-03,21:2027-03-08'
+    && kr.merges[0].into === 21 && kr.merges[0].removed[0].number === 22 && !kr.cycleChanges.length, JSON.stringify(kr));
+  r = await http('POST', '/api/settings/holidays', { token: T(admin), body: kbody });
+  ok('applied', r.status === 201 && r.body.merged === 1, JSON.stringify(r.body));
+  const khid = r.body.holidayId;
+  let kp = (await CyclePlan.findOne({ cycle: K._id }).lean()).classes;
+  const kn = (n) => kp.find(k => k.number === n);
+  ok('class 21 now holds both topics on 8 Mar', kn(21).date === '2027-03-08' && kn(21).title === 'K21 + K22' && /Merged from class 22/.test(kn(21).notes) && /n22/.test(kn(21).notes), JSON.stringify(kn(21)));
+  ok('class 22 row is gone, project class 23 unchanged on 10 Mar', !kn(22) && kn(23).date === '2027-03-10');
+  ok('project day and cycle end unchanged', perf.dayYmd((await Cycle.findById(K._id)).track.projectDate) === '2027-03-10' && perf.dayYmd((await Cycle.findById(K._id)).endDate) === '2027-03-12');
+  r = await http('DELETE', `/api/settings/holidays/${khid}`, { token: T(admin) });
+  kp = (await CyclePlan.findOne({ cycle: K._id }).lean()).classes;
+  ok('undo splits the merge and restores every date', r.status === 200 && kcls.every(([n, d]) => kn(n)?.date === d && kn(n).title === 'K' + n && kn(n).notes === 'n' + n), JSON.stringify(kp));
+  // no room left at all → refused
+  await CyclePlan.updateOne({ cycle: K._id }, { $set: { classes: [{ number: 20, title: 'K20', date: '2027-03-08' }, { number: 23, title: 'K23', date: '2027-03-10' }] } });
+  r = await http('POST', '/api/settings/holidays/preview', { token: T(admin), body: { ...kbody, from: '2027-03-08' } });
+  ok('refused when no class day is left before the project day', r.body.ok === false && /No class day is left/.test(r.body.batches[0].conflict || ''), JSON.stringify(r.body.batches[0]));
+  await CyclePlan.updateOne({ cycle: K._id }, { $set: { classes: kcls.map(([n, d]) => ({ number: n, title: 'K' + n, notes: 'n' + n, date: d })) } });
+
+  r = await http('POST', '/api/settings/holidays/preview', { token: T(admin), body: { ...kbody, from: '2027-03-10' } });
+  ok('keep: refused when the project day itself is the holiday', r.body.ok === false && /project day of Cycle 2/.test(r.body.batches[0].conflict || ''), JSON.stringify(r.body.batches[0]));
+  r = await http('POST', '/api/settings/holidays/preview', { token: T(admin), body: { ...kbody, from: '2027-03-01', to: '2027-03-03' } });
+  ok('keep: warns when several topics would be squeezed into one class', r.body.ok && /topics would be squeezed/.test(r.body.batches[0].note || ''), JSON.stringify(r.body.batches[0]));
+
+  console.log('\n— make-up day: Monday classes held on Saturday');
+  const mbody = { from: '2027-03-01', title: 'College closed', batchIds: [String(kb._id)], mode: 'makeup', makeupDate: '2027-03-06' };
+  r = await http('POST', '/api/settings/holidays/preview', { token: T(admin), body: { ...mbody, makeupDate: '2027-03-03' } });
+  ok('refused when the batch already has a class that day', r.body.ok === false && /already has class 21/.test(r.body.batches[0].conflict || ''), JSON.stringify(r.body.batches[0]));
+  r = await http('POST', '/api/settings/holidays/preview', { token: T(admin), body: { ...mbody, makeupDate: '2027-03-20' } });
+  ok('refused outside the cycle', r.body.ok === false && /outside Cycle 2/.test(r.body.batches[0].conflict || ''));
+  r = await http('POST', '/api/settings/holidays/preview', { token: T(admin), body: { ...mbody, to: '2027-03-02' } });
+  ok('refused for more than one day', r.status === 400);
+  r = await http('POST', '/api/settings/holidays', { token: T(admin), body: mbody });
+  ok('applied: only that day moves', r.status === 201 && r.body.moved === 1, JSON.stringify(r.body));
+  const mhid = r.body.holidayId;
+  kp = (await CyclePlan.findOne({ cycle: K._id }).lean()).classes;
+  ok('class 20 on Saturday 6 Mar, others unchanged', kn(20).date === '2027-03-06' && kn(21).date === '2027-03-03' && kn(22).date === '2027-03-08');
+  ok('students get the class question on the Saturday', (await sv.classOn(kb._id, '2027-03-06'))?.number === 20);
+  ok('Monday is a holiday', (await sv.classOn(kb._id, '2027-03-01')) === null && (await sv.holidayOn(kb._id, '2027-03-01')) === 'College closed');
+  r = await http('GET', '/api/settings/holidays', { token: T(admin) });
+  ok('holiday list shows the make-up date', r.body.holidays.some(h => h.mode === 'makeup' && h.makeupDate === '2027-03-06'));
+  r = await http('DELETE', `/api/settings/holidays/${mhid}`, { token: T(admin) });
+  kp = (await CyclePlan.findOne({ cycle: K._id }).lean()).classes;
+  ok('undo moves it back to Monday', kn(20).date === '2027-03-01');
 
   console.log(`\n${pass} passed, ${fail} failed`);
   server.close(); await mongoose.disconnect(); if (mongod) await mongod.stop();

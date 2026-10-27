@@ -59,6 +59,7 @@ const call = async (client, name, args = {}) => {
   const mongod = process.env.TEST_MONGO_URI ? null : await MongoMemoryServer.create();
   await mongoose.connect(process.env.TEST_MONGO_URI || mongod.getUri());
   if (process.env.TEST_MONGO_URI) await mongoose.connection.dropDatabase();
+  const college = await require('./college').setup();
 
   const app = express();
   app.use(express.json());
@@ -123,7 +124,7 @@ const call = async (client, name, args = {}) => {
   const cL = await connect(LUCKY);
   const { tools } = await cL.listTools();
   const names = tools.map(t => t.name).sort();
-  ok('trainer sees 33 tools', names.length === 33, names.join(','));
+  ok('trainer sees 35 tools', names.length === 35, names.join(','));
   const READ = ['whoami','search','list_batches','get_batch_roster','list_cycles','get_cycle_marks','get_cycle_plan','get_daily_logs','get_student_profile','get_today_overview','get_hall_of_fame'];
   ok('all 11 read tools marked read-only', READ.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === true));
   ok('server instructions sent', /Skill Lab/.test(cL.getInstructions() || ''));

@@ -14,4 +14,5 @@ const classPulseSchema = new mongoose.Schema({
 classPulseSchema.index({ batch: 1, student: 1, date: 1 }, { unique: true });
 classPulseSchema.index({ batch: 1, date: 1 });
 
+classPulseSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('ClassPulse', classPulseSchema);

@@ -40,4 +40,5 @@ function hashToken(plain) {
   return crypto.createHash('sha256').update(String(plain)).digest('hex');
 }
 
+apiTokenSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('ApiToken', apiTokenSchema);

@@ -50,4 +50,5 @@ cycleMarkSchema.statics.categoryFromMarks = function (assessment, project, asses
   return 'basic';
 };
 
+cycleMarkSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('CycleMark', cycleMarkSchema);

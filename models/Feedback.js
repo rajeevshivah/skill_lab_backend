@@ -36,6 +36,9 @@ const QUESTIONS = [
   ['overall', 'Overall, I am happy with this trainer'],
 ];
 
+feedbackWindowSchema.plugin(require('../services/tenant').plugin);   // college wall
+feedbackSchema.plugin(require('../services/tenant').plugin);
+
 module.exports = {
   FeedbackWindow: mongoose.model('FeedbackWindow', feedbackWindowSchema),
   Feedback: mongoose.model('Feedback', feedbackSchema),

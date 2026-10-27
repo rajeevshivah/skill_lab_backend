@@ -18,4 +18,5 @@ const projectSubmissionSchema = new mongoose.Schema({
 
 projectSubmissionSchema.index({ cycle: 1, student: 1 }, { unique: true });
 
+projectSubmissionSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('ProjectSubmission', projectSubmissionSchema);

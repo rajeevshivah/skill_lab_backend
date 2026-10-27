@@ -2,7 +2,7 @@ const express  = require('express');
 const Student  = require('../models/Student');
 const Batch    = require('../models/Batch');
 const Cycle    = require('../models/Cycle');
-const { protect } = require('../middleware/auth');
+const { protect, seesAll } = require('../middleware/auth');
 const router   = express.Router();
 
 // GET /api/search?q=term  — searches students, batches, cycles.
@@ -18,7 +18,7 @@ router.get('/', protect, async (req, res) => {
 
     // determine which batches this user may see
     let batchScope = null; // null = all
-    if (req.user.role !== 'superadmin') {
+    if (!seesAll(req.user)) {
       const mine = await Batch.find({ trainers: req.user._id }).select('_id');
       batchScope = mine.map(b => b._id);
     }

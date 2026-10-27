@@ -11,12 +11,13 @@ const Batch    = require('../models/Batch');
 const Semester = require('../models/Semester');
 const Student  = require('../models/Student');
 const { FeedbackWindow, Feedback, QUESTIONS } = require('../models/Feedback');
-const { protect, superadminOnly } = require('../middleware/auth');
+const { protect, superadminOnly, seesAll } = require('../middleware/auth');
 const sv       = require('../services/studentView');
 const router   = express.Router();
 const MIN_FOR_TRAINER = 5;
 
-const isAdmin = (u) => u.role === 'superadmin';
+// admin and management see every batch (management cannot write: middleware/auth.js)
+const isAdmin = seesAll;
 
 // GET /api/feedback/windows
 router.get('/windows', protect, async (req, res) => {

@@ -88,7 +88,7 @@ function delayProxy(targetHost, targetPort) {
     'Class plans board': [[`/cycleplans/board?semester=${S}`, tAdmin], ['/cycleplans/board', tTrainer]],
     'Performance': [['/performance', tAdmin], ['/performance', tTrainer]],
     'Meetings': [['/meeting/day', tAdmin], ['/meeting/review', tAdmin], ['/feedback/windows', tAdmin]],
-    'Placement': [['/students/placement', tAdmin]],
+    'Top students': [['/students/top', tAdmin], ['/students/top', tTrainer]],
     'Settings / planner': [['/settings/timetables', tAdmin], ['/settings/holidays', tAdmin], ['/batches', tAdmin]],
     'Users': [['/auth/users', tAdmin]],
     'Duplicates': [['/students/duplicates', tAdmin]],

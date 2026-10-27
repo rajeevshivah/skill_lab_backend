@@ -44,8 +44,9 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   const mongod = process.env.TEST_MONGO_URI ? null : await MongoMemoryServer.create();
   await mongoose.connect(process.env.TEST_MONGO_URI || mongod.getUri());
   if (process.env.TEST_MONGO_URI) await mongoose.connection.dropDatabase();
+  const college = await require('./college').setup();
 
-  const app = express(); app.use(express.json({ limit: '10mb' }));
+  const app = express(); app.use(express.json({ limit: '10mb' })); app.use(require('../middleware/org').resolveOrg);
   for (const [p, r] of [['auth', 'auth'], ['semesters', 'semesters'], ['batches', 'batches'], ['students', 'students'], ['plans', 'plans'],
     ['logs', 'logs'], ['cycles', 'cycles'], ['marks', 'cyclemarks'], ['cycleplans', 'cycleplans'], ['tokens', 'tokens'], ['performance', 'performance'],
     ['settings', 'settings'], ['meeting', 'meeting'], ['feedback', 'feedback'], ['student-admin', 'studentAdmin']])
@@ -74,8 +75,8 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   console.log('\n1. Who sees which tools');
   const aNames = (await cA.listTools()).tools.map(t => t.name);
   const tNames = (await cT.listTools()).tools.map(t => t.name);
-  ok('superadmin sees 55 tools', aNames.length === 55, aNames.length);
-  ok('trainer sees 33 tools (no admin ones)', tNames.length === 33, tNames.length);
+  ok('superadmin sees 60 tools', aNames.length === 60, aNames.length);
+  ok('trainer sees 35 tools (no admin ones)', tNames.length === 35, tNames.length);
   ok('trainer does NOT see create_user / update_batch / plan_cycles / add_holiday', !['create_user', 'update_batch', 'plan_cycles', 'add_holiday', 'list_users', 'create_cycles'].some(n => tNames.includes(n)));
   ok('create_cycles is gone (plan_cycles replaces it)', !aNames.includes('create_cycles') && aNames.includes('plan_cycles'));
   ok('trainer sees add_students / edit_student / set_batch_plan', ['add_students', 'edit_student', 'set_batch_plan'].every(n => tNames.includes(n)));
@@ -252,6 +253,22 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
     ok('get_meeting_day', !md.isError && Array.isArray(md.data.batches), md.text?.slice(0, 200));
     const rv = await call(cA, 'get_cycle_review', {});
     ok('get_cycle_review', !rv.isError && Array.isArray(rv.data.trainers), rv.text?.slice(0, 200));
+  }
+
+  console.log('\n7. Duplicates and top students');
+  {
+    const a = await Student.create({ name: 'Twin One', roll: 'TW1', batch: da._id, semester: sem._id });
+    const b = await Student.create({ name: 'Twin Onee', roll: 'TW1', batch: da._id, semester: sem._id });
+    const ld = await call(cA, 'list_duplicate_students');
+    ok('list_duplicate_students finds the pair', ld.data?.groups?.some(g => g.roll === 'TW1' && g.sameBatch), ld.text?.slice(0, 300));
+    const m = await yes(cA, 'merge_students', { keep_student_id: String(a._id), duplicate_student_id: String(b._id) });
+    ok('merge_students preview warns names differ', m.preview.data?.warnings?.some(w => /Names differ/.test(w)), m.preview.text?.slice(0, 300));
+    ok('merge_students saved', m.saved.data?.saved && !(await Student.exists({ _id: b._id })), m.saved.text?.slice(0, 300));
+    const top = await call(cT, 'get_top_students', {});
+    const mine = (await Batch.find({ trainers: samant._id })).map(x => x.name);
+    ok('get_top_students (trainer, own batches only)', !top.isError && top.data.students.length > 0 && top.data.students.every(s => mine.includes(s.batch.name)), mine);
+    const rules = await yes(cA, 'set_top_student_rules', { excellent: 85 });
+    ok('set_top_student_rules saved', rules.saved.data?.saved && (await call(cA, 'get_top_students', {})).data.weights.excellent === 85, rules.saved.text?.slice(0, 300));
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

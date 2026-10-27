@@ -26,7 +26,7 @@ const perf     = require('../services/performance');
 const sv       = require('../services/studentView');
 const router   = express.Router();
 
-const signStudent = (s) => jwt.sign({ sid: s._id, kind: 'student' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+const signStudent = (s) => jwt.sign({ sid: s._id, kind: 'student', org: s.org }, process.env.JWT_SECRET, { expiresIn: '30d' });
 const escapeRe = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const rollRe = (roll) => new RegExp(`^\\s*${escapeRe(String(roll).trim())}\\s*$`, 'i');
 

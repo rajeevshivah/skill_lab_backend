@@ -3,7 +3,9 @@ const Batch   = require('../models/Batch');
 const Plan    = require('../models/Plan');
 const Student = require('../models/Student');
 const Semester= require('../models/Semester');
-const { protect, superadminOnly } = require('../middleware/auth');
+const User    = require('../models/User');
+const tenant  = require('../services/tenant');
+const { protect, superadminOnly, seesAll } = require('../middleware/auth');
 const router  = express.Router();
 
 // GET /api/batches?semester=ID   (staff only — the public page uses /cycles/halloffame)
@@ -27,7 +29,7 @@ router.get('/mine', protect, async (req, res) => {
     const active = await Semester.findOne({ status: 'active' });
     const filter = {};
     if (active) filter.semester = active._id;
-    if (req.user.role !== 'superadmin') filter.trainers = req.user._id;
+    if (!seesAll(req.user)) filter.trainers = req.user._id;
     const batches = await Batch.find(filter)
       .populate('trainers', 'name email role')
       .populate('semester', 'name status')
@@ -53,12 +55,26 @@ router.get('/:id', protect, async (req, res) => {
   }
 });
 
+// Trainers must be staff of this college, and the semester this college's.
+async function checkRefs({ trainers, semester }) {
+  if (semester !== undefined && !(await Semester.exists({ _id: semester }))) return 'Semester not found';
+  if (trainers !== undefined) {
+    const ids = [...new Set((trainers || []).map(String))];
+    if (ids.some(id => !/^[a-f0-9]{24}$/i.test(id))) return 'Bad trainer id';
+    const n = await User.countDocuments({ _id: { $in: ids }, ...User.inOrg(tenant.currentOrg()) });
+    if (n !== ids.length) return 'A trainer is not on this college\'s staff';
+  }
+  return null;
+}
+
 // POST /api/batches  (superadmin) — create a batch; optionally seed plan from another batch
 router.post('/', protect, superadminOnly, async (req, res) => {
   try {
     const { name, semester, composition, track, trainers, copyPlanFrom } = req.body;
     if (!name || !semester)
       return res.status(400).json({ message: 'Name and semester required' });
+    const bad = await checkRefs({ trainers, semester });
+    if (bad) return res.status(400).json({ message: bad });
 
     const batch = await Batch.create({
       name, semester, composition: composition || '', track: track || '',
@@ -86,6 +102,8 @@ router.post('/', protect, superadminOnly, async (req, res) => {
 router.patch('/:id', protect, superadminOnly, async (req, res) => {
   try {
     const { name, composition, track, trainers, isActive } = req.body;
+    const bad = await checkRefs({ trainers });
+    if (bad) return res.status(400).json({ message: bad });
     const batch = await Batch.findByIdAndUpdate(
       req.params.id,
       { ...(name !== undefined && { name }),

@@ -22,6 +22,7 @@ const ok = (n, c, x = '') => { if (c) { pass++; console.log('  PASS', n); } else
   }
   await mongoose.connect(process.env.TEST_MONGO_URI || mongod.getUri(), { monitorCommands: true });
   if (process.env.TEST_MONGO_URI) await mongoose.connection.dropDatabase();
+  const college = await require('./college').setup();
   let trips = 0;
   mongoose.connection.getClient().on('commandStarted', () => trips++);
   require('../services/reqTiming').watch(mongoose.connection.getClient());
@@ -130,7 +131,7 @@ const ok = (n, c, x = '') => { if (c) { pass++; console.log('  PASS', n); } else
   await M('User').updateOne({ _id: big.t1._id }, { $set: { isActive: true } });
   r = await get('/auth/me', tok);
   ok('re-activated (updateOne) applies immediately', r.status === 200);
-  await M('User').findByIdAndUpdate(big.t1._id, { role: 'superadmin' });
+  await M('User').findByIdAndUpdate(big.t1._id, { 'memberships.0.role': 'superadmin' });   // role is per college
   r = await get('/auth/me', tok);
   ok('role change (findByIdAndUpdate) applies immediately', r.json?.user?.role === 'superadmin');
 

@@ -30,7 +30,7 @@ const tools = [...readTools, ...writeTools, ...adminTools, ...opsTools];
 // A 2-minute login token is minted for the call and never leaves the server.
 function makeApi(req) {
   const base  = `http://127.0.0.1:${req.socket.localPort}`;
-  const token = jwt.sign({ id: req.user._id }, process.env.JWT_SECRET, { expiresIn: '2m' });
+  const token = jwt.sign({ id: req.user._id, org: req.user.org }, process.env.JWT_SECRET, { expiresIn: '2m' });
   return async (method, path, body) => {
     const r = await fetch(base + path, {
       method,
@@ -46,11 +46,14 @@ const pkg = require('../package.json');
 
 const router = express.Router();
 
-const INSTRUCTIONS =
-  'This is the SHEAT College Skill Lab platform (skilllab.sheat.ac.in). ' +
+// What the AI app is told about this platform (per college).
+const instructions = (org) =>
+  `This is ${org.name}'s ${org.programName || 'Skill Lab'} on Pramakra, the class-to-proof training platform` +
+  `${org.hosts?.length ? ` (${org.hosts.find(h => h.includes('.')) || org.hosts[0]})` : ''}. ` +
+  'You only ever see and change this college\'s data. ' +
   'Data model: Semester → Batch (a training group, e.g. MERN track or BTech 3rd Sem) → Cycle (2–3 week block ending in ' +
   'a project + assessment) → per-student marks; batches also have daily class logs with roll-wise attendance and a syllabus plan. ' +
-  'You act as the signed-in user: superadmin sees all batches, trainers only their own. ' +
+  'You act as the signed-in user: superadmin (college admin) and viewer (management, read-only) see all batches, trainers only their own. ' +
   'Use search or list_batches/list_cycles to find ids before calling detail tools. ' +
   'Never treat a "not-evaluated" student as scoring 0. ' +
   'WRITE tools (fill_cycle_report, update_cycle_marks, set_assessment_held, set_cycle_top3, save_daily_log, save_cycle_plan_class and the admin tools) never save on ' +
@@ -73,6 +76,7 @@ function wrap(tool, req) {
     let kind = tool.write ? 'preview' : 'read';
     try {
       if (tool.admin && req.user.role !== 'superadmin') throw new ToolError('Superadmin only.');
+      if (tool.write && req.user.role === 'viewer') throw new ToolError('This is a read-only (management) account.');
       const data = await tool.handler(args || {}, req.user, { api: req.mcpApi });
       if (tool.write && data?.mode === 'saved') kind = 'write';
       return {
@@ -82,7 +86,7 @@ function wrap(tool, req) {
     } catch (err) {
       ok = false;
       // Our own ToolErrors are safe to show; anything else gets a generic message.
-      errorMsg = err instanceof ToolError ? err.message : 'Something went wrong on the Skill Lab server.';
+      errorMsg = err instanceof ToolError ? err.message : 'Something went wrong on the server.';
       if (!(err instanceof ToolError)) console.error(`[mcp] ${tool.name} failed:`, err);
       return { isError: true, content: [{ type: 'text', text: errorMsg }] };
     } finally {
@@ -100,12 +104,13 @@ function wrap(tool, req) {
 // A fresh MCP server per request, with every tool bound to this user.
 function buildServer(req) {
   const server = new McpServer(
-    { name: 'skilllab-sheat', title: 'SHEAT Skill Lab', version: pkg.version },
-    { instructions: INSTRUCTIONS }
+    { name: 'pramakra', title: `${req.org.shortName || req.org.name} ${req.org.programName || 'Skill Lab'}`, version: pkg.version },
+    { instructions: instructions(req.org) }
   );
   req.mcpApi = makeApi(req);
-  // Trainers never even see admin tools.
-  for (const tool of tools.filter(t => !t.admin || req.user.role === 'superadmin')) {
+  // Trainers never even see admin tools; management (viewer) sees read tools only.
+  const shown = tools.filter(t => (!t.admin || req.user.role === 'superadmin') && (!t.write || req.user.role !== 'viewer'));
+  for (const tool of shown) {
     server.registerTool(tool.name, {
       title: tool.title,
       description: tool.description,

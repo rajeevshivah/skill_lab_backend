@@ -3,7 +3,8 @@ const Student   = require('../models/Student');
 const Batch     = require('../models/Batch');
 const CycleMark = require('../models/CycleMark');
 const Topper    = require('../models/Topper');
-const { protect, canAccessBatch, noCotrainer } = require('../middleware/auth');
+const { protect, canAccessBatch, noCotrainer, seesAll, superadminOnly } = require('../middleware/auth');
+const studentMerge = require('../services/studentMerge');
 const router  = express.Router();
 
 const MAX_IMPORT_ROWS = 1000;
@@ -17,6 +18,8 @@ function sanitizePhoto(photoData) {
 }
 
 const clean = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+// Same roll whatever the letter case / stray spaces ("bca12" = "BCA12 ")
+const rollRe = (roll) => new RegExp(`^\\s*${String(roll).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
 
 // Validate one roster row. Returns { ok, doc? , reason? }
 function validateRow(raw) {
@@ -57,24 +60,11 @@ router.get('/', protect, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// GET /api/students/placement?semester=ID
-router.get('/placement', protect, async (req, res) => {
-  try {
-    const filter = {};
-    if (req.query.semester) filter.semester = req.query.semester;
-    const students = await Student.find(filter).select('-photo.data').populate('batch', 'name track');
-    const scored = students.map(s => {
-      const att = s.stats.totalSessions ? (s.stats.presentCount / s.stats.totalSessions) * 100 : 0;
-      const score = s.stats.topperCount * 5 + s.stats.projectCount * 3 + att * 0.1 + (s.flagged ? 2 : 0);
-      return {
-        _id: s._id, name: s.name, roll: s.roll, course: s.course, sem: s.sem,
-        section: s.section, batch: s.batch, stats: s.stats,
-        attendancePct: Math.round(att), flagged: s.flagged,
-        score: Math.round(score * 10) / 10,
-      };
-    }).sort((a, b) => b.score - a.score);
-    res.json({ students: scored, total: scored.length });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+// GET /api/students/top?semester=ID&batch=ID — who is doing well (services/topStudents.js).
+// Trainers: their own batches. Admin and management: every batch.
+router.get('/top', protect, async (req, res) => {
+  try { res.json(await require('../services/topStudents').topStudents(req.user, req.query)); }
+  catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 // GET /api/students/duplicates?semester=ID
@@ -82,31 +72,49 @@ router.get('/placement', protect, async (req, res) => {
 // twice inside one batch (a double import).
 router.get('/duplicates', protect, async (req, res) => {
   try {
-    if (req.user.role !== 'superadmin')
+    if (!seesAll(req.user))
       return res.status(403).json({ message: 'Admin only' });
     const filter = {};
     if (req.query.semester) filter.semester = req.query.semester;
     const students = await Student.find({ ...filter, roll: { $ne: '' } })
-      .select('name roll batch')
+      .select('name roll batch course sem section stats login.activatedAt createdAt')
       .populate('batch', 'name track');
     const byRoll = {};
     for (const s of students) {
-      const key = s.roll.toLowerCase();
+      const key = s.roll.trim().toLowerCase();
       byRoll[key] = byRoll[key] || [];
       byRoll[key].push(s);
     }
-    const groups = Object.values(byRoll)
-      .filter(list => list.length > 1)
-      .map(list => ({
+    const dupes = Object.values(byRoll).filter(list => list.length > 1);
+    const ids = dupes.flat().map(s => s._id);
+    const marks = await CycleMark.find({ student: { $in: ids }, status: 'evaluated' }).select('student').lean();
+    const markCount = (id) => marks.filter(m => String(m.student) === String(id)).length;
+    const groups = dupes.map(list => ({
         roll: list[0].roll,
         sameBatch: new Set(list.map(s => String(s.batch?._id))).size === 1,
-        entries: list.map(s => ({
-          studentId: s._id, name: s.name,
+        entries: list.sort((a, b) => a.createdAt - b.createdAt).map(s => ({
+          studentId: s._id, name: s.name, course: s.course, sem: s.sem, section: s.section,
           batchId: s.batch?._id, batchName: s.batch?.name || '—', track: s.batch?.track || '',
+          marks: markCount(s._id), present: s.stats?.presentCount || 0, signedUp: !!s.login?.activatedAt,
         })),
       }));
     res.json({ groups, count: groups.length });
   } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// POST /api/students/:id/merge  { into, preview }  (admin)
+// :id is the duplicate record; everything it carries moves to `into`, then it is
+// removed (services/studentMerge.js). preview=true only counts what would move.
+router.post('/:id/merge', protect, superadminOnly, async (req, res) => {
+  try {
+    const { into, preview } = req.body || {};
+    if (!into) return res.status(400).json({ message: 'Which record to keep (into)?' });
+    const out = preview ? await studentMerge.preview(into, req.params.id) : await studentMerge.merge(into, req.params.id, req.user._id);
+    res.json(out);
+  } catch (err) {
+    if (err instanceof studentMerge.MergeError) return res.status(400).json({ message: err.message });
+    res.status(500).json({ message: err.message });
+  }
 });
 
 // POST /api/students/:id/move  — move a student to a different batch
@@ -120,6 +128,8 @@ router.post('/:id/move', protect, async (req, res) => {
     if (!target) return res.status(404).json({ message: 'Target batch not found' });
     const student = await Student.findById(req.params.id);
     if (!student) return res.status(404).json({ message: 'Student not found' });
+    const clash = student.roll && await Student.findOne({ batch, roll: rollRe(student.roll), _id: { $ne: student._id } });
+    if (clash) return res.status(400).json({ message: `Roll ${student.roll} is already in ${target.name} (${clash.name}). Merge them on the Duplicates page instead.` });
     student.batch = batch;
     student.semester = target.semester;
     student.updatedBy = req.user._id;
@@ -150,7 +160,7 @@ router.post('/', protect, async (req, res) => {
     if (!v.ok) return res.status(400).json({ message: `Cannot add student — ${v.reason}.` });
 
     if (v.doc.roll) {
-      const clash = await Student.findOne({ batch, roll: v.doc.roll });
+      const clash = await Student.findOne({ batch, roll: rollRe(v.doc.roll) });
       if (clash)
         return res.status(400).json({ message: `Roll ${v.doc.roll} already belongs to ${clash.name} in this batch.` });
     }
@@ -278,7 +288,7 @@ router.put('/:id', protect, async (req, res) => {
 
       if (v.doc.roll && v.doc.roll.toLowerCase() !== (existing.roll || '').toLowerCase()) {
         const clash = await Student.findOne({
-          batch: existing.batch, roll: v.doc.roll, _id: { $ne: existing._id },
+          batch: existing.batch, roll: rollRe(v.doc.roll), _id: { $ne: existing._id },
         });
         if (clash)
           return res.status(400).json({ message: `Roll ${v.doc.roll} already belongs to ${clash.name} in this batch.` });

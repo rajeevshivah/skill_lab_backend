@@ -21,13 +21,14 @@ const ProjectSubmission = require('../models/ProjectSubmission');
 const ClassPulse = require('../models/ClassPulse');
 const MeetingNote = require('../models/MeetingNote');
 const { FeedbackWindow, Feedback, QUESTIONS } = require('../models/Feedback');
-const { protect } = require('../middleware/auth');
+const { protect, seesAll } = require('../middleware/auth');
 const perf     = require('../services/performance');
 const sv       = require('../services/studentView');
 const logRule  = require('../services/logRule');
 const router   = express.Router();
 
-const isAdmin = (u) => u.role === 'superadmin';
+// admin and management see every batch (management cannot write: middleware/auth.js)
+const isAdmin = seesAll;
 const isYmd = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 const sid = (x) => x == null ? '' : String(x._id || x);
 
@@ -257,6 +258,13 @@ router.delete('/notes/:id', protect, async (req, res) => {
     await MeetingNote.deleteOne({ _id: n._id });
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// GET /api/meeting/health?from=&to=&batches=id,id&trainer=id — Class health (services/classHealth.js)
+// Everyone on staff sees every batch (same as the Class plans board); the page opens on "my batches".
+router.get('/health', protect, async (req, res) => {
+  try { res.json(await require('../services/classHealth').healthView(req.user, req.query)); }
+  catch (err) { res.status(400).json({ message: err.message }); }
 });
 
 router.__shared = { dayView, reviewView };

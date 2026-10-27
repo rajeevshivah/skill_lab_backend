@@ -65,4 +65,5 @@ studentSchema.pre('aggregate', function () {
   this.pipeline().unshift({ $match: { demo: { $ne: true } } });
 });
 
+studentSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('Student', studentSchema);

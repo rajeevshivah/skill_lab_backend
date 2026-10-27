@@ -40,4 +40,5 @@ const dailyLogSchema = new mongoose.Schema({
 // One log per batch per day
 dailyLogSchema.index({ batch: 1, date: 1 }, { unique: true });
 
+dailyLogSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('DailyLog', dailyLogSchema);

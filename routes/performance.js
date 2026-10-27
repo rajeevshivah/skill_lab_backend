@@ -24,6 +24,20 @@ async function semesterFor(req) {
 }
 const periodOf = (c) => perf.istYmd(perf.deadlineOf(c));
 
+// Warning signs across a trainer's cycles: work done by the admin instead, not done, late.
+function signsOf(scores) {
+  const out = { adminDone: 0, missing: 0, late: 0, logsMissing: 0, logsLate: 0, logsByAdmin: 0 };
+  for (const s of scores) {
+    for (const k of ['report', 'marks', 'top3', 'plan']) {
+      const st = s.items?.[k]?.state;
+      if (st === 'admin') out.adminDone++; else if (st === 'missing') out.missing++; else if (st === 'late') out.late++;
+    }
+    const L = s.items?.logs || {};
+    out.logsMissing += L.missing || 0; out.logsLate += (L.late || 0) + (L.incomplete || 0); out.logsByAdmin += L.admin || 0;
+  }
+  return out;
+}
+
 // Builds the dashboard for one deadline period (or, for old callers, one cycle number).
 async function buildDashboard(semester, { period = null, number = null } = {}) {
   const all = await Cycle.find({ semester: semester._id }).select('number track startDate endDate batch').lean();
@@ -90,7 +104,7 @@ async function buildDashboard(semester, { period = null, number = null } = {}) {
     for (const p of pts) {
       if (p.score == null) continue;
       const e = per.get(p.id) || { id: p.id, name: p.name, scores: [] };
-      e.scores.push({ cycleId: String(c._id), here: !!row, batch: bname, score: p.score });
+      e.scores.push({ cycleId: String(c._id), here: !!row, batch: bname, score: p.score, number: c.number, period: periodOf(c), items: p.items });
       per.set(p.id, e);
     }
   }
@@ -101,6 +115,9 @@ async function buildDashboard(semester, { period = null, number = null } = {}) {
     semesterAvg: avg(t.scores.map(s => s.score)),
     cyclesScored: t.scores.length,
     batches: [...new Set(t.scores.filter(s => s.here).map(s => s.batch))],
+    // every scored cycle this semester (for the trainer pop-up), oldest first, + the warning signs summed
+    history: [...t.scores].sort((a, b) => a.period.localeCompare(b.period) || a.batch.localeCompare(b.batch)),
+    signs: signsOf(t.scores),
   })).sort((a, b) => (b.thisCycle ?? -1) - (a.thisCycle ?? -1) || (b.semesterAvg ?? -1) - (a.semesterAvg ?? -1));
 
   return { ...base, period: pick, number: number || null, rows, trainers, generatedAt: new Date() };

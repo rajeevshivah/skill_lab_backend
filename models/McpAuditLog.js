@@ -19,4 +19,5 @@ const mcpAuditLogSchema = new mongoose.Schema({
 mcpAuditLogSchema.index({ user: 1, createdAt: -1 });
 mcpAuditLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 180 * 24 * 60 * 60 });
 
+mcpAuditLogSchema.plugin(require('../services/tenant').plugin);   // college wall: every record + query belongs to one college
 module.exports = mongoose.model('McpAuditLog', mcpAuditLogSchema);

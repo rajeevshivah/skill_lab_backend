@@ -36,6 +36,19 @@ anyone(read({
 }));
 
 anyone(read({
+  name: 'get_class_health',
+  title: 'Class health (day, week or cycle)',
+  description: 'Every planned class of every batch between from and to (default today; up to 120 days): its state (done / partly / not done / ' +
+    'missing / holiday / upcoming), whether the log was on time and complete, attendance, what students said (covered %, understanding /5) and ' +
+    'flags (late log, incomplete log, not logged, students disagree, low attendance, more answers than present). Summed per batch and overall. ' +
+    'Filter by batch_ids or a trainer. For a whole cycle, pass that cycle\'s start and end dates (the result lists cycle periods to pick from).',
+  input: { from: isoDate.optional(), to: isoDate.optional(), batch_ids: z.array(objId).max(40).optional(), trainer_id: objId.optional() },
+  async run(a, api) {
+    return unwrap(await api('GET', '/api/meeting/health' + qs({ from: a.from, to: a.to, batches: (a.batch_ids || []).join(','), trainer: a.trainer_id })));
+  },
+}));
+
+anyone(read({
   name: 'get_cycle_review',
   title: 'Cycle review (per trainer)',
   description: 'End-of-cycle review for one deadline period (default: the latest tracked one): per trainer and batch — score and parts, ' +
@@ -215,19 +228,24 @@ admin(writeTool({
 admin(writeTool({
   name: 'add_holiday',
   title: 'Mark a holiday',
-  description: 'Superadmin only. Mark a day or range as holiday for all batches (or batch_ids). mode "shift" moves planned classes ' +
-    'from that day on to each batch\'s next class days (cycle end / project day / deadline move if needed; refused if it would run into ' +
-    'the next cycle or a timetable is only guessed). mode "mark" moves nothing and flags those classes for re-planning. ' +
-    'Holiday days never count against anyone.',
-  input: { from: isoDate, to: isoDate.optional(), title: z.string().min(1).max(80), batch_ids: z.array(objId).max(40).optional(), mode: z.enum(['shift', 'mark']) },
+  description: 'Superadmin only. Mark a day or range as holiday for all batches (or batch_ids). Four modes: ' +
+    '"shift" moves planned classes from that day on to each batch\'s next class days (cycle end / project day / deadline move if needed; refused if it would run into ' +
+    'the next cycle or a timetable is only guessed). "keep" moves classes forward too but keeps the project day and cycle end: a class that no longer fits ' +
+    'is merged into the last class before the project day. "makeup" (one day only) moves that day\'s classes to makeup_date instead, e.g. Monday\'s classes held ' +
+    'on Saturday; nothing else moves. "mark" moves nothing and flags those classes for re-planning. ' +
+    'Holiday days never count against anyone. A day already marked: undo_holiday first, then mark it again in the new mode.',
+  input: { from: isoDate, to: isoDate.optional(), title: z.string().min(1).max(80), batch_ids: z.array(objId).max(40).optional(),
+    mode: z.enum(['shift', 'mark', 'keep', 'makeup']), makeup_date: isoDate.optional().describe('mode makeup: the date the classes happen instead') },
   async plan(a, user, ctx) {
-    const body = { from: a.from, to: a.to || a.from, title: a.title, batchIds: a.batch_ids || [], mode: a.mode };
+    const body = { from: a.from, to: a.to || a.from, title: a.title, batchIds: a.batch_ids || [], mode: a.mode, makeupDate: a.makeup_date || null };
     const p = unwrap(await ctx.api('POST', '/api/settings/holidays/preview', body));
     if (!p.ok) throw new ToolError('Cannot do this — ' + p.batches.filter(b => b.conflict).map(b => `${b.batch}: ${b.conflict}`).join(' | '));
     return {
-      summary: `${a.title}: ${body.from}${body.to !== body.from ? ' – ' + body.to : ''} (${a.mode === 'shift' ? 'move classes forward' : 'mark only'})`,
-      changes: p.batches.filter(b => b.moves.length || b.onHoliday.length || b.cycleChanges.length).map(b => ({ batch: b.batch,
-        moves: b.moves.map(m => `class ${m.number}: ${m.from} → ${m.to}`), needsReplanning: b.onHoliday.map(m => `class ${m.number} on ${m.date}`),
+      summary: `${a.title}: ${body.from}${body.to !== body.from ? ' – ' + body.to : ''} (${{ shift: 'move classes forward', keep: 'move forward, keep project day', makeup: `classes held on ${body.makeupDate}`, mark: 'mark only' }[a.mode]})`,
+      changes: p.batches.filter(b => b.moves.length || (b.merges || []).length || b.onHoliday.length || b.cycleChanges.length).map(b => ({ batch: b.batch,
+        moves: b.moves.map(m => `class ${m.number}: ${m.from} → ${m.to}`),
+        merges: (b.merges || []).map(g => `class ${g.removed.map(x => x.number).join(', ')} merged into class ${g.into} (${g.date})`),
+        needsReplanning: b.onHoliday.map(m => `class ${m.number} on ${m.date}`),
         cycleChanges: b.cycleChanges })),
       warnings: p.batches.filter(b => b.note).map(b => `${b.batch}: ${b.note}`),
       apply: async () => unwrap(await ctx.api('POST', '/api/settings/holidays', body)),

@@ -22,6 +22,7 @@ const http = async (method, path, { token, body } = {}) => {
   if (!process.env.TEST_MONGO_URI) { const { MongoMemoryServer } = require('mongodb-memory-server'); mongod = await MongoMemoryServer.create(); }
   await mongoose.connect(process.env.TEST_MONGO_URI || mongod.getUri());
   if (process.env.TEST_MONGO_URI) await mongoose.connection.dropDatabase();
+  const college = await require('./college').setup();
   const app = express(); app.use(express.json());
   app.use('/api/cycleplans', require('../routes/cycleplans'));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });

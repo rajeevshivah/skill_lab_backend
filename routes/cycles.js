@@ -9,7 +9,7 @@ const topThree = require('../services/topThree');
 const studentStats = require('../services/studentStats');
 const Student  = require('../models/Student');
 const Semester = require('../models/Semester');
-const { protect, superadminOnly, canAccessBatch } = require('../middleware/auth');
+const { protect, superadminOnly, canAccessBatch, seesAll } = require('../middleware/auth');
 const perf = require('../services/performance');
 const planner = require('../services/cyclePlanner');
 const router   = express.Router();
@@ -118,7 +118,7 @@ router.get('/', protect, async (req, res) => {
     if (req.query.batch)    filter.batch = req.query.batch;
     if (req.query.semester) filter.semester = req.query.semester;
     // trainers only see cycles of their own batches
-    if (req.user.role !== 'superadmin') {
+    if (!seesAll(req.user)) {
       const myBatches = await Batch.find({ trainers: req.user._id }).select('_id');
       filter.batch = { $in: myBatches.map(b => b._id) };
     }

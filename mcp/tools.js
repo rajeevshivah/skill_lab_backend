@@ -461,6 +461,30 @@ def({
 
 // 10 ─ get_today_overview
 def({
+  name: 'get_top_students',
+  title: 'Top students',
+  description:
+    'Who is doing well: every student of the batches you can see (trainer: own batches; admin/management: all), ranked by a score ' +
+    'out of 100 = the college\'s weights over average cycle marks %, attendance % and projects submitted % (parts with no data yet are ' +
+    'left out, not counted as 0). tier "excellent"/"good" from the college\'s cut-offs; no tier until a cycle is evaluated. ' +
+    'Also: rank inside the batch, top-3 finishes, trainer flag. Filter by batch, tier, or limit.',
+  input: {
+    batch_id: z.string().optional(),
+    tier: z.enum(['excellent', 'good', 'good_or_better']).optional(),
+    limit: z.number().int().min(1).max(300).optional().describe('Default 50'),
+  },
+  async handler({ batch_id, tier, limit = 50 }, user) {
+    if (batch_id) requireId(batch_id, 'batch');
+    const out = await require('../services/topStudents').topStudents(user, { batch: batch_id });
+    let list = out.students;
+    if (tier === 'good_or_better') list = list.filter(s => s.tier);
+    else if (tier) list = list.filter(s => s.tier === tier);
+    return { semester: out.semester?.name || null, weights: out.weights, counts: out.counts, returned: Math.min(limit, list.length),
+      students: list.slice(0, limit).map(({ hasPhoto, ...s }) => s) };
+  },
+});
+
+def({
   name: 'get_today_overview',
   title: 'Today overview',
   description:

@@ -19,7 +19,9 @@
     "test:meeting": "node tests/meeting.js",
     "profile": "node tests/profile.js",
     "test:speed": "node tests/speed.js",
-    "test:e2e": "node tests/e2e.js"
+    "test:e2e": "node tests/e2e.js",
+    "test:tenant": "node tests/tenant.js",
+    "test:roster": "node tests/roster.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

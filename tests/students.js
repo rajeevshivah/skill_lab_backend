@@ -26,6 +26,7 @@ const day = (n) => perf.ymdToDay(shift(today, n));
   if (!process.env.TEST_MONGO_URI) { const { MongoMemoryServer } = require('mongodb-memory-server'); mongod = await MongoMemoryServer.create(); }
   await mongoose.connect(process.env.TEST_MONGO_URI || mongod.getUri());
   if (process.env.TEST_MONGO_URI) await mongoose.connection.dropDatabase();
+  const college = await require('./college').setup();
   const app = express(); app.use(express.json({ limit: '5mb' }));
   for (const [p, r] of [['students', 'students'], ['cycleplans', 'cycleplans'], ['student', 'student'], ['student-admin', 'studentAdmin'], ['feedback', 'feedback']])
     app.use('/api/' + p, require('../routes/' + r));
