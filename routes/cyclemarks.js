@@ -93,7 +93,12 @@ async function saveCycleMarks(user, cycleId, inputRows) {
     if (!(await canAccessBatch(req.user, cycle.batch)))
       return { status: 403, body: { message: 'Not your batch' } };
 
-    const rows = Array.isArray(inputRows) ? inputRows : [];
+    // only students of this cycle's batch can get marks here
+    const roster = new Set((await Student.find({ batch: cycle.batch }).select('_id').lean()).map(x => String(x._id)));
+    const all = Array.isArray(inputRows) ? inputRows : [];
+    const strangers = all.filter(r => !roster.has(String(r?.student)));
+    if (strangers.length) return { status: 400, body: { message: `${strangers.length} row(s) are for students who are not in this batch. Nothing was saved.` } };
+    const rows = all;
     const held = cycle.assessmentHeld !== false;
 
     // Validate the WHOLE sheet before writing any of it. This used to be a

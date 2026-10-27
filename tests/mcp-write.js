@@ -75,7 +75,7 @@ async function previewAndConfirm(c, name, args) {
   const cyc = await Cycle.create({ batch: mern._id, semester: sem._id, number: 2, startDate: new Date(Date.now() - 7 * 864e5), endDate: new Date(Date.now() + 7 * 864e5) });
   const closed = await Cycle.create({ batch: mern._id, semester: sem._id, number: 1, status: 'closed', startDate: new Date(Date.now() - 30 * 864e5), endDate: new Date(Date.now() - 16 * 864e5) });
   await CycleMark.create({ cycle: cyc._id, batch: mern._id, semester: sem._id, student: S[0]._id, status: 'evaluated', assessment: 40, project: 40, category: 'excellent', categoryOverridden: true, remark: 'great demo' });
-  cyc.report.top3 = [{ rank: 1, student: S[0]._id, name: 'Aman', roll: '101', github: 'gh/aman', photo: { data: 'AAAA', contentType: 'image/png' } }];
+  cyc.report.top3 = [{ rank: 1, student: S[0]._id, name: 'Aman', roll: '101', github: 'https://github.com/aman', photo: { data: 'AAAA', contentType: 'image/png' } }];
   await cyc.save();
 
   const J = (u) => jwt.sign({ id: u._id }, process.env.JWT_SECRET);
@@ -86,7 +86,7 @@ async function previewAndConfirm(c, name, args) {
   console.log('\n1. Tool list');
   const { tools } = await cS.listTools();
   const W = ['fill_cycle_report', 'update_cycle_marks', 'set_cycle_top3', 'save_daily_log', 'save_cycle_plan_class'];
-  ok('trainer sees 37 tools', tools.length === 37, tools.length);
+  ok('trainer sees 38 tools', tools.length === 38, tools.length);
   ok('write tools are NOT marked read-only', W.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === false));
   const READ = ['whoami','search','list_batches','get_batch_roster','list_cycles','get_cycle_marks','get_cycle_plan','get_daily_logs','get_student_profile','get_today_overview','get_hall_of_fame'];
   ok('read tools still read-only', READ.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === true));
@@ -113,7 +113,7 @@ async function previewAndConfirm(c, name, args) {
   ok('confirm with right token → saved', saved.data?.mode === 'saved' && saved.data.saved === true, saved.text);
   const c2 = await Cycle.findById(cyc._id);
   ok('report fields saved + submitted', c2.report.syllabusCoverage === 'behind' && c2.report.performanceRating === 4 && c2.report.submitted === true);
-  ok('untouched report fields kept', c2.report.top3.length === 1 && c2.report.top3[0].github === 'gh/aman');
+  ok('untouched report fields kept', c2.report.top3.length === 1 && c2.report.top3[0].github === 'https://github.com/aman');
 
   console.log('\n3. Permissions same as website');
   ok('other batch trainer → refused', (await call(cD, 'fill_cycle_report', rep)).isError);
@@ -145,11 +145,11 @@ async function previewAndConfirm(c, name, args) {
   console.log('\n5. set_cycle_top3');
   const dup = await call(cS, 'set_cycle_top3', { cycle_id: String(cyc._id), top3: [{ rank: 1, roll: '101' }, { rank: 1, roll: '102' }] });
   ok('duplicate rank → refused', dup.isError);
-  const t = await previewAndConfirm(cS, 'set_cycle_top3', { cycle_id: String(cyc._id), top3: [{ rank: 1, roll: '101' }, { rank: 2, roll: '102', github: 'gh/bhavna' }, { rank: 3, roll: '104' }] });
+  const t = await previewAndConfirm(cS, 'set_cycle_top3', { cycle_id: String(cyc._id), top3: [{ rank: 1, roll: '101' }, { rank: 2, roll: '102', github: 'https://github.com/bhavna' }, { rank: 3, roll: '104' }] });
   ok('top3 preview warns: 104 not evaluated', t.preview.data.warnings.some(w => /Divya/.test(w)));
   ok('top3 saved', t.saved.data?.saved === true, t.saved.text);
   const c3 = await Cycle.findById(cyc._id);
-  ok('Aman photo + github kept', c3.report.top3[0].photo.data === 'AAAA' && c3.report.top3[0].github === 'gh/aman');
+  ok('Aman photo + github kept', c3.report.top3[0].photo.data === 'AAAA' && c3.report.top3[0].github === 'https://github.com/aman');
   ok('3 entries in rank order', c3.report.top3.map(x => x.roll).join(',') === '101,102,104');
 
   console.log('\n6. save_daily_log');

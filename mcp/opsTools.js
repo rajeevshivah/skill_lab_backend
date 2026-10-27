@@ -82,7 +82,9 @@ anyone(read({
 anyone(read({
   name: 'get_student_access',
   title: 'Student sign-in status of a batch',
-  description: 'The batch join code students use to set up their sign-in, and which students have set up / last signed in.',
+  description: 'How students of a batch set up their sign-in, and who has set up / last signed in. ' +
+    'mode "personal" (default): each student not set up yet has their own setup code (setupCode) — hand each student theirs. ' +
+    'mode "batch": one batch join code (joinCode) for everyone. Management (read-only) does not see codes.',
   input: { batch_id: objId },
   async run(a, api) { return unwrap(await api('GET', `/api/student-admin/batch/${a.batch_id}`)); },
 }));
@@ -166,7 +168,8 @@ anyone(writeTool({
 anyone(writeTool({
   name: 'reset_student_password',
   title: 'Reset a student\'s sign-in',
-  description: 'The student sets up again with roll number + batch join code + a new password.',
+  description: 'Clears the student\'s password and signs them out everywhere. Returns a new personal setup code (setupCode) to hand the student ' +
+    '(in batch mode they use the batch join code). They then set up again with roll number + code + a new password.',
   input: { student_id: objId },
   async plan(a, user, ctx) {
     return { summary: `Reset sign-in of student ${a.student_id}`, changes: a,
@@ -186,6 +189,18 @@ anyone(writeTool({
 }));
 
 // ── Writes: superadmin ───────────────────────────────────────────────
+admin(writeTool({
+  name: 'set_student_signup',
+  title: 'How students set up their sign-in',
+  description: 'personal (safer, default): each student gets their own setup code from the trainer. ' +
+    'batch: one join code per batch — easier, but anyone with the code and a roll number can claim that student.',
+  input: { mode: z.enum(['personal', 'batch']) },
+  async plan(a, user, ctx) {
+    return { summary: `Student sign-up: ${a.mode === 'personal' ? 'personal setup codes' : 'one batch join code'}`, changes: a,
+      apply: async () => unwrap(await ctx.api('PUT', '/api/settings/student-signup', { mode: a.mode })) };
+  },
+}));
+
 const groupSchema = z.object({
   name: z.string().max(60).optional(),
   batch_ids: z.array(objId).min(1).max(40),

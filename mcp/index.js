@@ -30,7 +30,7 @@ const tools = [...readTools, ...writeTools, ...adminTools, ...opsTools];
 // A 2-minute login token is minted for the call and never leaves the server.
 function makeApi(req) {
   const base  = `http://127.0.0.1:${req.socket.localPort}`;
-  const token = jwt.sign({ id: req.user._id, org: req.user.org }, process.env.JWT_SECRET, { expiresIn: '2m' });
+  const token = jwt.sign({ id: req.user._id, org: req.user.org, v: req.user.tokenVersion || 0 }, process.env.JWT_SECRET, { expiresIn: '2m' });
   return async (method, path, body) => {
     const r = await fetch(base + path, {
       method,

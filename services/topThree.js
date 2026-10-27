@@ -18,6 +18,8 @@ const CycleMark = require('../models/CycleMark');
 const Student   = require('../models/Student');
 const ProjectSubmission = require('../models/ProjectSubmission');
 const perf = require('./performance');
+const files = require('./fileStore');
+const pick = (p) => ({ data: p.data || null, contentType: p.contentType, key: p.key || null });
 const stats = require('./studentStats');
 
 const sid = (x) => x == null ? '' : String(x._id || x);
@@ -57,7 +59,7 @@ async function publish(cycle, user) {
       rank: r.rank, student: r.student, name: r.name, roll: r.roll,
       github: old?.github || sub?.githubUrl || st?.github || '',
       // the student's own profile photo first (services/studentPhoto.js), else one a trainer added here
-      photo: st?.photo?.data ? { data: st.photo.data, contentType: st.photo.contentType } : (old?.photo?.data ? old.photo : { data: null, contentType: null }),
+      photo: files.has(st?.photo) ? pick(st.photo) : (files.has(old?.photo) ? pick(old.photo) : { data: null, contentType: null, key: null }),
     };
   });
   cycle.markModified('report');

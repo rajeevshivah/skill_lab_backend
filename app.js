@@ -7,6 +7,10 @@ const reqTiming = require('./services/reqTiming');
 const { resolveOrg, requireModule, corsOrigin } = require('./middleware/org');
 
 const app = express();
+// Render puts one proxy in front of the app: trust exactly that hop, so req.ip is
+// the real visitor (a forged X-Forwarded-For from the visitor is ignored).
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
 // ── Middleware ────────────────────────────────────────────────────
 // Browsers may call from any college's own web address (middleware/org.js).
@@ -17,6 +21,19 @@ app.use(reqTiming.middleware);   // Server-Timing header: database vs app time p
 app.use(compression({ filter: (req, res) => !req.originalUrl.startsWith('/mcp') && compression.filter(req, res) }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Server errors: the full message goes to the log; in production the user gets a
+// plain sentence, never database or code details.
+app.use((req, res, next) => {
+  const json = res.json.bind(res);
+  res.json = (body) => {
+    if (res.statusCode >= 500 && process.env.NODE_ENV === 'production') {
+      console.error(`[500] ${req.method} ${req.originalUrl}:`, body?.message || body);
+      return json({ message: 'Something went wrong on the server. Please try again.' });
+    }
+    return json(body);
+  };
+  next();
+});
 // Every request runs inside one college from here on (services/tenant.js).
 app.use(resolveOrg);
 
@@ -51,8 +68,7 @@ app.use('/api/meeting',   training, require('./routes/meeting'));        // meet
 app.use('/mcp', require('./mcp'));
 
 // GET /api/health          — is the server up (also used by keep-awake pingers)
-// GET /api/health?db=1     — plus database round-trip time and the database's region
-//                            (Atlas tags), to check the server and database sit close together
+// GET /api/health?db=1     — plus the database round-trip time
 app.get('/api/health', async (req, res) => {
   const out = { status: 'ok', time: new Date(), uptimeSec: Math.round(process.uptime()) };
   if (req.query.db) {
@@ -61,12 +77,20 @@ app.get('/api/health', async (req, res) => {
       const db = mongoose.connection.db;
       const pings = [];
       for (let i = 0; i < 3; i++) { const t = Date.now(); await db.admin().command({ ping: 1 }); pings.push(Date.now() - t); }
-      const hello = await db.admin().command({ hello: 1 });
-      out.db = { pingMs: Math.min(...pings), pings, region: hello.tags?.region || null, provider: hello.tags?.provider || null };
+      out.db = { pingMs: Math.min(...pings), pings };
     } catch (e) { out.db = { error: e.message }; }
-    out.server = { region: process.env.RENDER_REGION || process.env.REGION || null };
+
   }
   res.set('Cache-Control', 'no-store').json(out);
+});
+
+// Anything thrown and not answered: a broken request body is the sender's mistake (400);
+// everything else is logged and answered with a plain sentence.
+app.use((err, req, res, next) => {   // eslint-disable-line no-unused-vars
+  if (err.type === 'entity.parse.failed' || err.type === 'entity.too.large')
+    return res.status(err.status || 400).json({ message: err.type === 'entity.too.large' ? 'That upload is too large.' : 'The request could not be read.' });
+  console.error(`[error] ${req.method} ${req.originalUrl}:`, err);
+  res.status(500).json({ message: 'Something went wrong on the server. Please try again.' });
 });
 
 module.exports = app;

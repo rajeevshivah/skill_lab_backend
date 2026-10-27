@@ -124,7 +124,7 @@ const call = async (client, name, args = {}) => {
   const cL = await connect(LUCKY);
   const { tools } = await cL.listTools();
   const names = tools.map(t => t.name).sort();
-  ok('trainer sees 37 tools', names.length === 37, names.join(','));
+  ok('trainer sees 38 tools', names.length === 38, names.join(','));
   const READ = ['whoami','search','list_batches','get_batch_roster','list_cycles','get_cycle_marks','get_cycle_plan','get_daily_logs','get_student_profile','get_today_overview','get_hall_of_fame'];
   ok('all 11 read tools marked read-only', READ.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === true));
   ok('server instructions sent', /Skill Lab/.test(cL.getInstructions() || ''));

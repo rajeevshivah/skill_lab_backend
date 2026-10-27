@@ -1,0 +1,59 @@
+# Nightly database backup (free): dumps MongoDB Atlas, encrypts the dump and
+# keeps it for 30 days as a downloadable file on this workflow's run page.
+#
+# Set up once (GitHub → this repo → Settings → Secrets and variables → Actions):
+#   MONGODB_URI        the same connection string Render uses
+#   BACKUP_PASSPHRASE  a long random phrase — keep it somewhere safe; without it
+#                      a backup cannot be opened
+# Atlas → Network Access must allow GitHub's runners (0.0.0.0/0, as Render does).
+#
+# Run it by hand any time: Actions → "Database backup" → Run workflow.
+#
+# To restore (on your own computer, with MongoDB Database Tools installed):
+#   1. Download the backup file from the run page and unzip it.
+#   2. openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in backup.archive.gz.enc -out backup.archive.gz
+#      (it asks for BACKUP_PASSPHRASE)
+#   3. Test first into a spare database:
+#        mongorestore --uri "<spare database URI>" --archive=backup.archive.gz --gzip
+#      Restoring over the live database (add --drop) replaces what is there — only do this on purpose.
+name: Database backup
+
+on:
+  schedule:
+    - cron: '30 20 * * *'    # 02:00 India time, every night
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Install MongoDB Database Tools
+        run: |
+          wget -q https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-100.10.0.deb
+          sudo apt-get install -y ./mongodb-database-tools-ubuntu2204-x86_64-100.10.0.deb
+
+      - name: Dump and encrypt
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "$MONGODB_URI" || { echo "MONGODB_URI secret is missing"; exit 1; }
+          test -n "$BACKUP_PASSPHRASE" || { echo "BACKUP_PASSPHRASE secret is missing"; exit 1; }
+          mongodump --uri "$MONGODB_URI" --archive=backup.archive.gz --gzip
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 -pass env:BACKUP_PASSPHRASE \
+            -in backup.archive.gz -out backup.archive.gz.enc
+          rm backup.archive.gz
+          ls -lh backup.archive.gz.enc
+
+      - name: Keep for 30 days
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-${{ github.run_number }}
+          path: backup.archive.gz.enc
+          retention-days: 30
+          if-no-files-found: error

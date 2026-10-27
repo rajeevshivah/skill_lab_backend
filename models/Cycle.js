@@ -23,7 +23,7 @@ const reportSchema = new mongoose.Schema({
     name:   String,
     roll:   String,
     github: { type: String, default: '' },
-    photo:  { data: { type: String, default: null }, contentType: { type: String, default: null } },
+    photo:  { data: { type: String, default: null }, contentType: { type: String, default: null }, key: { type: String, default: null } },
   }],
 
   // ---- Trainer structured (trackable across cycles) ----

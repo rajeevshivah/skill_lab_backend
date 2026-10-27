@@ -16,6 +16,7 @@
 //    becomes COMPLETE — every class has a topic — credited to whoever's save
 //    completed it (admin → "made by admin", not counted; see performance.js).
 // ─────────────────────────────────────────────────────────────────────
+const Batch = require('../models/Batch');
 const CyclePlan = require('../models/CyclePlan');
 const Cycle     = require('../models/Cycle');
 const { canAccessBatch } = require('../middleware/auth');
@@ -29,11 +30,12 @@ const FIELDS = ['number', 'title', 'notes', 'trainer', 'date', 'time'];
 function normalize(c, i) {
   return {
     number: Number(c.number) || i + 1,
-    title:  String(c.title || '').trim(),
-    notes:  String(c.notes || '').trim(),
-    trainer: c.trainer ? sid(c.trainer) : null,
+    title:  String(c.title || '').trim().slice(0, 200),
+    notes:  String(c.notes || '').trim().slice(0, 2000),
+    trainer: c.trainer && /^[a-f0-9]{24}$/i.test(sid(c.trainer)) ? sid(c.trainer) : null,
     date:   /^\d{4}-\d{2}-\d{2}$/.test(c.date || '') ? c.date : '',
-    time:   String(c.time || '').slice(0, 20),
+    // a clock time "HH:MM" (or a range "HH:MM-HH:MM"), nothing else
+    time:   /^\d{1,2}:\d{2}(\s*[-–]\s*\d{1,2}:\d{2})?$/.test(String(c.time || '').trim()) ? String(c.time).trim() : '',
   };
 }
 const same = (a, b) => FIELDS.every(f => String(a[f] ?? '') === String(b[f] ?? ''));
@@ -83,6 +85,11 @@ async function editPlan(user, cycleId, mutate, opts = {}) {
   const list = out.map(normalize);
   const nums = list.map(k => k.number);
   if (new Set(nums).size !== nums.length) return { status: 400, body: { message: 'Two classes have the same number.' } };
+  // a class's trainer must be one of this batch's trainers (a name kept from earlier may stay)
+  const batchTrainers = new Set(((await Batch.findById(cycle.batch).select('trainers').lean())?.trainers || []).map(sid));
+  const wasThere = new Map(before.map(k => [k.number, sid(k.trainer)]));
+  const stranger = list.find(k => k.trainer && !batchTrainers.has(k.trainer) && wasThere.get(k.number) !== k.trainer);
+  if (stranger) return { status: 400, body: { message: `Class ${stranger.number}: that trainer is not on this batch.` } };
 
   const now = new Date();
   const prev = new Map(before.map(k => [k.number, k]));

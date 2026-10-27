@@ -6,36 +6,15 @@ const { protect, superadminOnly, roleIn } = require('../middleware/auth');
 const router  = express.Router();
 
 // A staff token belongs to one college (org) — or to none for the platform owner's console.
-const signToken = (id, org) =>
-  jwt.sign({ id, org: org || null }, process.env.JWT_SECRET, { expiresIn: '7d' });
+// `v` = the user's tokenVersion: a password change or reset bumps it, and older
+// sign-ins stop working at once (middleware/auth.js).
+const signToken = (user, org) =>
+  jwt.sign({ id: user._id, org: org || null, v: user.tokenVersion || 0 }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-// ── Login throttling ──────────────────────────────────────────────
-// In-memory, per-IP+email. Enough to stop password guessing against a single
-// known admin address; a single dyno holds the counters, which is fine here.
-const WINDOW_MS   = 15 * 60 * 1000;
-const MAX_ATTEMPTS = 8;
-const attempts = new Map(); // key -> { count, first }
-
-function throttleKey(req) {
-  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || 'unknown';
-  return `${ip}|${String(req.body?.email || '').toLowerCase()}`;
-}
-function tooManyAttempts(key) {
-  const rec = attempts.get(key);
-  if (!rec) return false;
-  if (Date.now() - rec.first > WINDOW_MS) { attempts.delete(key); return false; }
-  return rec.count >= MAX_ATTEMPTS;
-}
-function noteFailure(key) {
-  const rec = attempts.get(key);
-  if (!rec || Date.now() - rec.first > WINDOW_MS) attempts.set(key, { count: 1, first: Date.now() });
-  else rec.count += 1;
-}
-// Keep the map from growing without bound on a long-lived process.
-setInterval(() => {
-  const cutoff = Date.now() - WINDOW_MS;
-  for (const [k, v] of attempts) if (v.first < cutoff) attempts.delete(k);
-}, WINDOW_MS).unref?.();
+// ── Login limits: per address and per email (services/throttle.js) ──
+const loginLimit = require('../services/throttle').limiter({ perIp: 30, perAccount: 8 });
+const MIN_PW = 10;
+const pwProblem = (pw) => String(pw || '').length < MIN_PW ? `Password must be at least ${MIN_PW} characters.` : null;
 
 // POST /api/auth/login
 router.post('/login', async (req, res) => {
@@ -44,29 +23,28 @@ router.post('/login', async (req, res) => {
     if (!email || !password)
       return res.status(400).json({ message: 'Email and password required' });
 
-    const key = throttleKey(req);
-    if (tooManyAttempts(key))
+    if (loginLimit.blocked(req, email))
       return res.status(429).json({ message: 'Too many failed attempts. Try again in 15 minutes.' });
 
     const user = await User.findOne({ email: String(email).toLowerCase() });
     if (!user || !(await user.comparePassword(password))) {
-      noteFailure(key);
+      loginLimit.fail(req, email);
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
     if (!user.isActive) {
-      noteFailure(key);
+      loginLimit.fail(req, email);
       return res.status(401).json({ message: 'Account deactivated' });
     }
 
     // Signed in for the college of this web address (middleware/org.js).
     const org = tenant.currentOrg();
     const role = roleIn(user, org);
-    if (!role) { noteFailure(key); return res.status(401).json({ message: org ? 'Your account is not active for this college.' : 'This address is not linked to a college.' }); }
+    if (!role) { loginLimit.fail(req, email); return res.status(401).json({ message: org ? 'Your account is not active for this college.' : 'This address is not linked to a college.' }); }
 
-    attempts.delete(key);
+    loginLimit.clear(req, email);
     res.json({
-      token: signToken(user._id, org),
+      token: signToken(user, org),
       user: { id: user._id, name: user.name, email: user.email, role, platformOwner: !!user.platformOwner }
     });
   } catch (err) {
@@ -77,6 +55,21 @@ router.post('/login', async (req, res) => {
 // GET /api/auth/me
 router.get('/me', protect, (req, res) => {
   res.json({ user: req.user });
+});
+
+// PUT /api/auth/password { current, password } — change my own password.
+// Every other sign-in of mine ends; this one gets a fresh token.
+router.put('/password', protect, async (req, res) => {
+  try {
+    const { current, password } = req.body || {};
+    if (pwProblem(password)) return res.status(400).json({ message: pwProblem(password) });
+    const user = await User.findById(req.user._id);
+    if (!user || !(await user.comparePassword(String(current || '')))) return res.status(400).json({ message: 'Current password is wrong.' });
+    user.password = password;
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    await user.save();
+    res.json({ ok: true, token: signToken(user, tenant.currentOrg()) });
+  } catch (err) { res.status(500).json({ message: 'Could not change the password.' }); }
 });
 
 // ── This college's staff ──────────────────────────────────────────
@@ -106,6 +99,7 @@ router.post('/create-user', protect, superadminOnly, async (req, res) => {
       return res.status(201).json({ message: 'This person already has a login (another college). They can now use it here too.',
         existing: true, user: { id: exists._id, name: exists.name, email: exists.email, role } });
     }
+    if (pwProblem(password)) return res.status(400).json({ message: pwProblem(password) });
     const user = await User.create({ name, email: mail, password, role, memberships: [{ org, role, isActive: true }] });
     res.status(201).json({
       message: 'User created',
@@ -136,6 +130,10 @@ router.patch('/users/:id', protect, superadminOnly, async (req, res) => {
     if (!user) return res.status(404).json({ message: 'User not found' });
     const m = user.membershipIn(org);
     if (role !== undefined && !User.ROLES.includes(role)) return res.status(400).json({ message: 'Unknown role' });
+    // The platform owner's account is changed only by the platform owner.
+    if (user.platformOwner && !req.user.platformOwner)
+      return res.status(403).json({ message: 'This is the platform owner\'s account. Only the platform owner can change it.' });
+    if (password && pwProblem(password)) return res.status(400).json({ message: pwProblem(password) });
 
     // Never let the last active admin be demoted or switched off — that
     // locks everyone out of the admin screens with no way back in.
@@ -150,7 +148,7 @@ router.patch('/users/:id', protect, superadminOnly, async (req, res) => {
     if (name !== undefined)     user.name = name;
     if (role !== undefined)     m.role = role;
     if (isActive !== undefined) m.isActive = !!isActive;
-    if (password)               user.password = password; // triggers re-hash
+    if (password) { user.password = password; user.tokenVersion = (user.tokenVersion || 0) + 1; }   // re-hash; older sign-ins end
     user.markModified('memberships');
     await user.save();
     res.json({ user: view(user, org) });
@@ -167,6 +165,8 @@ router.delete('/users/:id', protect, superadminOnly, async (req, res) => {
       return res.status(400).json({ message: 'Cannot delete yourself' });
     const target = await User.findOne({ _id: req.params.id, ...User.inOrg(org) });
     if (!target) return res.status(404).json({ message: 'User not found' });
+    if (target.platformOwner && !req.user.platformOwner)
+      return res.status(403).json({ message: 'This is the platform owner\'s account. Only the platform owner can change it.' });
     if (target.membershipIn(org).role === 'superadmin' && (await activeAdmins(org, target._id)) === 0)
       return res.status(400).json({ message: 'This is the only active superadmin. Promote someone else first.' });
     target.memberships = target.memberships.filter(x => String(x.org) !== String(org));
@@ -179,3 +179,4 @@ router.delete('/users/:id', protect, superadminOnly, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.MIN_PW = MIN_PW;

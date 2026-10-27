@@ -158,7 +158,9 @@ async function upsertDailyLog(user, input) {
     const incoming = Array.isArray(attendance) ? attendance : [];
     const merged = new Map();
     if (existing) for (const a of existing.attendance) merged.set(a.student.toString(), !!a.present);
-    for (const a of incoming) if (a && a.student) merged.set(a.student.toString(), !!a.present);
+    // only students of this batch can be marked
+    const roster = new Set((await Student.find({ batch }).select('_id').lean()).map(x => String(x._id)));
+    for (const a of incoming) if (a && a.student && roster.has(String(a.student))) merged.set(a.student.toString(), !!a.present);
 
     const contributors = new Set((existing?.contributors || []).map(String));
     contributors.add(req.user._id.toString());

@@ -7,8 +7,9 @@
 //          same tool again with the SAME arguments + confirm=true + the token.
 //
 //  The token is a signature over (user, tool, arguments, expiry), made with
-//  JWT_SECRET. So it cannot be reused for different arguments, another tool,
-//  another user, or after 15 minutes, and the server stays stateless.
+//  JWT_SECRET. So it cannot be used for different arguments, another tool,
+//  another user, another college, or after 15 minutes — and each token works
+//  ONCE (a used token is remembered until it expires).
 // ─────────────────────────────────────────────────────────────────────
 const crypto = require('crypto');
 
@@ -28,10 +29,15 @@ function stripControl(args) {
   return rest;
 }
 
+const used = new Map();   // token -> expiry
+setInterval(() => { const now = Date.now(); for (const [t, e] of used) if (e < now) used.delete(t); }, 60 * 1000).unref?.();
+const college = () => String(require('../services/tenant').currentOrg() || '');
+
 function sign(userId, tool, args, exp) {
-  const secret = process.env.JWT_SECRET || 'dev-secret';
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('JWT_SECRET is not set');
   return crypto.createHmac('sha256', secret)
-    .update(`${userId}|${tool}|${stable(stripControl(args))}|${exp}`)
+    .update(`${userId}|${college()}|${tool}|${stable(stripControl(args))}|${exp}`)
     .digest('base64url');
 }
 
@@ -51,6 +57,8 @@ exports.checkPreviewToken = (userId, tool, args, token) => {
   const a = Buffer.from(sig), b = Buffer.from(expected);
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b))
     return 'The arguments changed since the preview. Make a fresh preview with the final values and ask the user again.';
+  if (used.has(token)) return 'This preview was already confirmed once. Make a fresh preview to do it again.';
+  used.set(token, exp);
   return null;
 };
 

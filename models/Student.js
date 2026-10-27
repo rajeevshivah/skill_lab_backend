@@ -28,9 +28,11 @@ const studentSchema = new mongoose.Schema({
   demo:     { type: Boolean, default: false },
   // Manual flag from a trainer — "watch this one"
   flagged:  { type: Boolean, default: false },
+  // photo: in file storage (key) when it is set up, else inside the record (data) — services/fileStore.js
   photo: {
     data:        { type: String, default: null },
     contentType: { type: String, default: null },
+    key:         { type: String, default: null },
   },
   // Student's own GitHub profile (they can edit it after signing in)
   github:   { type: String, default: '', trim: true },
@@ -39,6 +41,10 @@ const studentSchema = new mongoose.Schema({
     passwordHash: { type: String, default: null, select: false },
     activatedAt:  { type: Date, default: null },
     lastLoginAt:  { type: Date, default: null },
+    // personal one-time code to set up the sign-in (college setting "personal"):
+    // shown only to the student's trainers, cleared once used
+    setupCode:    { type: String, default: null, select: false },
+    tokenVersion: { type: Number, default: 0 },     // bumped on password change/reset → older sign-ins end
   },
   addedBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

@@ -27,17 +27,15 @@ const perf     = require('../services/performance');
 const sv       = require('../services/studentView');
 const router   = express.Router();
 
-const signStudent = (s) => jwt.sign({ sid: s._id, kind: 'student', org: s.org }, process.env.JWT_SECRET, { expiresIn: '30d' });
+// `v` = the student's login.tokenVersion: a password change or a trainer's reset bumps it,
+// and every older sign-in of that student stops working at once.
+const signStudent = (s) => jwt.sign({ sid: s._id, kind: 'student', org: s.org, v: s.login?.tokenVersion || 0 }, process.env.JWT_SECRET, { expiresIn: '30d' });
+const MIN_PW = 8;
 const escapeRe = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const rollRe = (roll) => new RegExp(`^\\s*${escapeRe(String(roll).trim())}\\s*$`, 'i');
 
-// ── throttling (per IP + roll) ──
-const WINDOW_MS = 15 * 60 * 1000, MAX_ATTEMPTS = 8;
-const attempts = new Map();
-const tkey = (req) => `${(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip}|${String(req.body?.roll || '').toLowerCase()}`;
-const blocked = (k) => { const r = attempts.get(k); if (!r) return false; if (Date.now() - r.first > WINDOW_MS) { attempts.delete(k); return false; } return r.count >= MAX_ATTEMPTS; };
-const fail = (k) => { const r = attempts.get(k); if (!r || Date.now() - r.first > WINDOW_MS) attempts.set(k, { count: 1, first: Date.now() }); else r.count++; };
-setInterval(() => { const c = Date.now() - WINDOW_MS; for (const [k, v] of attempts) if (v.first < c) attempts.delete(k); }, WINDOW_MS).unref?.();
+// ── failed-attempt limits: per address and per roll (services/throttle.js) ──
+const signInLimit = require('../services/throttle').limiter({ perIp: 40, perAccount: 8 });
 
 // ── middleware ──
 async function protectStudent(req, res, next) {
@@ -48,40 +46,52 @@ async function protectStudent(req, res, next) {
     if (d.kind !== 'student' || !d.sid) return res.status(401).json({ message: 'Please sign in as a student' });
     const s = await Student.findById(d.sid).select('+login.passwordHash');
     if (!s || !s.login?.passwordHash) return res.status(401).json({ message: 'Please sign in again' });
+    if ((d.v || 0) !== (s.login.tokenVersion || 0)) return res.status(401).json({ message: 'Your password was changed. Please sign in again.' });
     req.student = s;
     next();
   } catch { res.status(401).json({ message: 'Please sign in again' }); }
 }
 
 // POST /api/student/activate  { roll, code, password }
+// First sign-in. `code` = the student's personal setup code (college setting
+// "personal", the default) or the batch code shown in class (setting "batch").
+// One answer for every wrong roll/code, so it can't be used to find out rolls.
 router.post('/activate', async (req, res) => {
   try {
     const { roll, code, password } = req.body || {};
-    const k = tkey(req);
-    if (blocked(k)) return res.status(429).json({ message: 'Too many tries. Wait 15 minutes.' });
-    if (!roll || !code || !password) return res.status(400).json({ message: 'Roll number, batch code and a new password are needed.' });
-    if (String(password).length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters.' });
+    if (signInLimit.blocked(req, roll)) return res.status(429).json({ message: 'Too many tries. Wait 15 minutes.' });
+    if (!roll || !code || !password) return res.status(400).json({ message: 'Roll number, setup code and a new password are needed.' });
+    if (String(password).length < MIN_PW) return res.status(400).json({ message: `Password must be at least ${MIN_PW} characters.` });
+    const c = String(code).trim().toUpperCase();
+    const wrong = () => { signInLimit.fail(req, roll); return res.status(400).json({ message: 'Roll number or code is not right. Check the code your trainer gave you.' }); };
     const sem = await Semester.findOne({ status: 'active' });
-    const batch = sem && await Batch.findOne({ semester: sem._id, joinCode: String(code).trim().toUpperCase() });
-    if (!batch) { fail(k); return res.status(400).json({ message: 'That batch code is not right. Check the code your trainer showed.' }); }
-    const matches = await Student.find({ batch: batch._id, roll: rollRe(roll) }).select('+login.passwordHash').setOptions({ withDemo: true });
-    if (!matches.length) { fail(k); return res.status(400).json({ message: 'This roll number is not in that batch. Ask your trainer to check the roster.' }); }
+    if (!sem) return wrong();
+    let matches;
+    if ((await require('../services/studentCodes').mode()) === 'batch') {
+      const batch = await Batch.findOne({ semester: sem._id, joinCode: c });
+      if (!batch) return wrong();
+      matches = await Student.find({ batch: batch._id, roll: rollRe(roll) }).select('+login.passwordHash +login.setupCode').setOptions({ withDemo: true });
+    } else {
+      matches = (await Student.find({ semester: sem._id, roll: rollRe(roll) }).select('+login.passwordHash +login.setupCode').setOptions({ withDemo: true }))
+        .filter(x => x.login?.setupCode && x.login.setupCode === c);
+    }
+    if (!matches.length) return wrong();
     if (matches.length > 1) return res.status(409).json({ message: 'Your roll number is in this batch twice. Ask your trainer to tap "Merge" on the batch page, then set up again.' });
     const s = matches[0];
     if (s.login?.passwordHash) return res.status(409).json({ message: 'This roll number is already set up. Sign in, or ask your trainer to reset your password.' });
-    s.login = { passwordHash: await bcrypt.hash(String(password), 10), activatedAt: new Date(), lastLoginAt: new Date() };
+    s.login = { passwordHash: await bcrypt.hash(String(password), 10), activatedAt: new Date(), lastLoginAt: new Date(),
+      setupCode: null, tokenVersion: (s.login?.tokenVersion || 0) + 1 };
     await s.save();
-    attempts.delete(k);
+    signInLimit.clear(req, roll);
     res.status(201).json({ token: signStudent(s), student: { id: s._id, name: s.name, roll: s.roll } });
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) { res.status(500).json({ message: 'Could not set up. Try again.' }); }
 });
 
 // POST /api/student/login  { roll, password }
 router.post('/login', async (req, res) => {
   try {
     const { roll, password } = req.body || {};
-    const k = tkey(req);
-    if (blocked(k)) return res.status(429).json({ message: 'Too many tries. Wait 15 minutes.' });
+    if (signInLimit.blocked(req, roll)) return res.status(429).json({ message: 'Too many tries. Wait 15 minutes.' });
     if (!roll || !password) return res.status(400).json({ message: 'Roll number and password are needed.' });
     const sem = await Semester.findOne({ status: 'active' });
     if (!sem) return res.status(400).json({ message: 'No active semester.' });
@@ -89,13 +99,13 @@ router.post('/login', async (req, res) => {
     for (const s of list) {
       if (s.login?.passwordHash && await bcrypt.compare(String(password), s.login.passwordHash)) {
         s.login.lastLoginAt = new Date(); await s.save();
-        attempts.delete(k);
+        signInLimit.clear(req, roll);
         return res.json({ token: signStudent(s), student: { id: s._id, name: s.name, roll: s.roll } });
       }
     }
-    fail(k);
+    signInLimit.fail(req, roll);
     if (list.length && list.every(s => !s.login?.passwordHash))
-      return res.status(401).json({ message: 'First time? Use "Set up my account" with the batch code from your trainer.' });
+      return res.status(401).json({ message: 'First time? Use "Set up my account" with the code from your trainer.' });
     res.status(401).json({ message: 'Roll number or password is wrong. Forgot it? Ask your trainer to reset it.' });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -110,12 +120,13 @@ router.get('/me', protectStudent, async (req, res) => {
 router.put('/password', protectStudent, async (req, res) => {
   try {
     const { current, password } = req.body || {};
-    if (!password || String(password).length < 6) return res.status(400).json({ message: 'New password must be at least 6 characters.' });
+    if (!password || String(password).length < MIN_PW) return res.status(400).json({ message: `New password must be at least ${MIN_PW} characters.` });
     if (!(await bcrypt.compare(String(current || ''), req.student.login.passwordHash)))
       return res.status(400).json({ message: 'Current password is wrong.' });
     req.student.login.passwordHash = await bcrypt.hash(String(password), 10);
+    req.student.login.tokenVersion = (req.student.login.tokenVersion || 0) + 1;   // other sign-ins end
     await req.student.save();
-    res.json({ ok: true });
+    res.json({ ok: true, token: signStudent(req.student) });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -141,6 +152,7 @@ router.put('/photo', protectStudent, async (req, res) => {
 // A GitHub link OR pasted code (or both). The screenshot is optional; the phone
 // shrinks it first and the server refuses anything over 300 KB or not a real image.
 const SHOT_MAX = 300 * 1024;
+const fileStore = require('../services/fileStore');
 router.post('/submission', protectStudent, async (req, res) => {
   try {
     if (req.student.demo) return res.status(201).json({ ok: true, demo: true, message: 'Demo account — this was not saved.' });
@@ -157,8 +169,12 @@ router.post('/submission', protectStudent, async (req, res) => {
     if (live && !/^https?:\/\/.+/.test(live)) return res.status(400).json({ message: 'The live link must start with https://' });
     const set = { batch: s.batch, githubUrl: gh, liveUrl: live, note: String(b.note || '').slice(0, 500), files, submittedAt: now, late: sv.todayIST() > w.projectDay };
     if (b.screenshot?.data) {
-      try { set.screenshot = require('../services/studentPhoto').parse(`data:${b.screenshot.contentType};base64,${b.screenshot.data}`, SHOT_MAX); }
+      let shot;
+      try { shot = require('../services/studentPhoto').parse(`data:${b.screenshot.contentType};base64,${b.screenshot.data}`, SHOT_MAX); }
       catch (e) { return res.status(400).json({ message: e.message.replace('photo', 'screenshot') }); }
+      const old = await ProjectSubmission.findOne({ cycle: cycle._id, student: s._id }).select('screenshot.key screenshot.contentType').lean();
+      set.screenshot = await fileStore.store(shot, 'screens');
+      if (old?.screenshot?.key) fileStore.remove(old.screenshot).catch(() => {});
     }
     await ProjectSubmission.updateOne({ cycle: cycle._id, student: s._id }, { $set: set }, { upsert: true });
     await require('../services/studentStats').recompute([s._id]);   // Top students: projects submitted

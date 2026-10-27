@@ -118,7 +118,7 @@ const ok = (n, c, x = '') => { if (c) { pass++; console.log('  PASS', n); } else
   r = await get('/cycles', T(big.admin));
   ok('cycles list carries no photo data', !r.body.includes('"data":"') && r.json.cycles.length > 0);
   r = await get(`/cycles/${big.firstCycle._id}`, T(big.admin));
-  ok('cycle report still gets its photos (to edit them)', !!r.json.cycle.report.top3[0].photo?.data);
+  ok('cycle report gets each photo as an address, not the image', !!r.json.cycle.report.top3[0].photo?.url && !r.json.cycle.report.top3[0].photo.data);
 
   console.log('\n— sign-in check is cached, but changes apply at once');
   const tok = T(big.t1);

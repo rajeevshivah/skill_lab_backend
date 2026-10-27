@@ -1,3 +1,4 @@
+const files = require('../services/fileStore');
 const express  = require('express');
 const mongoose = require('mongoose');
 const Cycle    = require('../models/Cycle');
@@ -88,7 +89,7 @@ router.get('/halloffame', async (req, res) => {
       batch: c.batch ? { _id: c.batch._id, name: c.batch.name, track: c.batch.track } : null,
       top3: (c.report.top3 || []).sort((a, b) => a.rank - b.rank).map(t => ({
         rank: t.rank, name: t.name, roll: t.roll, github: t.github,
-        photo: t.photo?.contentType ? `/cycles/${c._id}/photo/${t.rank}?v=${new Date(c.updatedAt || 0).getTime()}` : null,
+        photo: t.photo?.contentType ? (files.publicUrl(t.photo) || `/cycles/${c._id}/photo/${t.rank}?v=${new Date(c.updatedAt || 0).getTime()}`) : null,
       })),
     }));
     // A short public cache: the board changes a few times a cycle, not every second.
@@ -104,10 +105,13 @@ router.get('/:id/photo/:rank', async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).end();
     const c = await Cycle.findById(req.params.id).select('report.top3').lean();
     const t = (c?.report?.top3 || []).find(x => x.rank === Number(req.params.rank));
-    if (!t?.photo?.data) return res.status(404).end();
-    res.set('Content-Type', t.photo.contentType || 'image/jpeg');
+    if (!files.has(t?.photo)) return res.status(404).end();
+    const direct = files.publicUrl(t.photo);
+    if (direct) return res.redirect(302, direct);           // in file storage: the browser fetches it from there
+    res.set('Content-Type', /^image\/(jpeg|png|webp)$/.test(t.photo.contentType || '') ? t.photo.contentType : 'image/jpeg');
+    res.set('X-Content-Type-Options', 'nosniff');
     res.set('Cache-Control', 'public, max-age=31536000, immutable');
-    res.send(Buffer.from(t.photo.data, 'base64'));
+    res.send(await files.read(t.photo));
   } catch (err) { res.status(500).end(); }
 });
 
@@ -137,7 +141,11 @@ router.get('/:id', protect, async (req, res) => {
     let live = null;
     if (cycle.status !== 'closed') live = await computeLiveData(cycle);
     const rs = reportState(cycle, req.user);
-    res.json({ cycle, live, reportOpen: rs.open, reportOpensOn: rs.opensOn, reportNote: rs.reason || '' });
+    // Top 3 photos go out as addresses, not as the image bytes
+    const out = cycle.toObject();
+    if (out.report?.top3) out.report.top3 = out.report.top3.map(t => ({ ...t,
+      photo: files.has(t.photo) ? { contentType: t.photo.contentType, url: files.publicUrl(t.photo) || `/cycles/${cycle._id}/photo/${t.rank}?v=${new Date(cycle.updatedAt || 0).getTime()}` } : null }));
+    res.json({ cycle: out, live, reportOpen: rs.open, reportOpensOn: rs.opensOn, reportNote: rs.reason || '' });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -243,7 +251,7 @@ async function saveCycleReport(user, cycleId, input) {
       'standoutStudents','strugglingStudents','topicsNotCovered','reflection',
       'projectTitle','projectNote',
     ];
-    for (const k of allowed) if (k in req.body) cycle.report[k] = req.body[k];
+    for (const k of allowed) if (k in req.body) { const v = req.body[k]; cycle.report[k] = typeof v === 'string' ? v.slice(0, 4000) : v; }
 
     // "Back to automatic": drop the hand-made Top 3 and rank from the marks again.
     const before3 = (cycle.report.top3 || []).map(t => String(t.student || t.roll || t.name));
@@ -252,22 +260,38 @@ async function saveCycleReport(user, cycleId, input) {
       cycle.report.top3 = [];
       await topThree.publish(cycle, req.user);
     }
-    // top3: sanitize photos (accept data-URL, store as {data,contentType}); cap 2MB each
+    // top3: it goes on the PUBLIC Hall of Fame, so every part is checked — at most 3 places,
+    // photos must be real JPG/PNG/WEBP images (≤ 400 KB, same check as student photos),
+    // the link must be a GitHub https link, names and rolls plain short text.
     else if (Array.isArray(req.body.top3)) {
-      const MAX = 2 * 1024 * 1024;
-      cycle.report.top3 = req.body.top3.map(t => {
+      if (req.body.top3.length > 3) return { status: 400, body: { message: 'Top 3 has at most 3 places.' } };
+      const parse = require('../services/studentPhoto').parse;
+      const oldTop = cycle.report.top3 || [];
+      // photo 'keep' = the photo this person already has in the Top 3 (they may have moved rank)
+      const keptFor = (t) => (oldTop.find(o => (t.student && String(o.student) === String(t.student)) || (!t.student && o.name === t.name && o.roll === t.roll))
+        || oldTop.find(o => o.rank === Number(t.rank)))?.photo;
+      const out = [];
+      for (const t of req.body.top3) {
+        const rank = Number(t.rank);
+        if (![1, 2, 3].includes(rank)) return { status: 400, body: { message: 'Top 3 ranks are 1, 2 and 3.' } };
         let photo = { data: null, contentType: null };
-        if (t.photo && typeof t.photo === 'string') {
-          const m = t.photo.match(/^data:(image\/\w+);base64,(.+)$/);
-          if (m && Buffer.from(m[2], 'base64').length <= MAX) photo = { data: m[2], contentType: m[1] };
-        } else if (t.photo && t.photo.data) {
-          photo = t.photo; // already stored shape (unchanged on re-save)
-        }
-        return {
-          rank: t.rank, student: t.student || null,
-          name: t.name || '', roll: t.roll || '', github: t.github || '', photo,
-        };
-      });
+        try {
+          if (t.photo === 'keep') { const o = keptFor(t); if (files.has(o)) photo = { data: o.data || null, contentType: o.contentType, key: o.key || null }; }
+          else if (typeof t.photo === 'string' && t.photo) photo = await files.store(parse(t.photo), 'top3');
+          else if (t.photo?.data || t.photo?.key) {   // unchanged on re-save: keep only what we stored ourselves
+            const old = oldTop.map(o => o.photo).find(o => o && ((o.key && o.key === t.photo.key) || (o.data && o.data === t.photo.data)));
+            if (old)
+              photo = { data: old.data || null, contentType: old.contentType, key: old.key || null };
+            else if (t.photo.data) photo = await files.store(parse(`data:${t.photo.contentType};base64,${t.photo.data}`), 'top3');
+          }
+        } catch (e) { return { status: 400, body: { message: `Top 3 place ${rank}: ${e.message}` } }; }
+        const github = String(t.github || '').trim();
+        if (github && !/^https:\/\/(www\.)?github\.com\/[\w.-]+(\/[\w.\-\/]*)?$/.test(github))
+          return { status: 400, body: { message: `Top 3 place ${rank}: the link must be a GitHub link (https://github.com/…).` } };
+        out.push({ rank, student: /^[a-f0-9]{24}$/i.test(String(t.student || '')) ? t.student : null,
+          name: String(t.name || '').trim().slice(0, 80), roll: String(t.roll || '').trim().slice(0, 40), github, photo });
+      }
+      cycle.report.top3 = out;
       // A different set or order of people than the stored Top 3 = a hand-made choice;
       // from now on new marks don't overwrite it. (Adding photos/links is not a change.)
       const after3 = cycle.report.top3.map(t => String(t.student || t.roll || t.name));

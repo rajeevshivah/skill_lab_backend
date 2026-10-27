@@ -75,12 +75,12 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   console.log('\n1. Who sees which tools');
   const aNames = (await cA.listTools()).tools.map(t => t.name);
   const tNames = (await cT.listTools()).tools.map(t => t.name);
-  ok('superadmin sees 61 tools', aNames.length === 61, aNames.length);
-  ok('trainer sees 37 tools (no admin ones)', tNames.length === 37, tNames.length);
+  ok('superadmin sees 63 tools', aNames.length === 63, aNames.length);
+  ok('trainer sees 38 tools (no admin ones)', tNames.length === 38, tNames.length);
   ok('trainer does NOT see create_user / update_batch / plan_cycles / add_holiday', !['create_user', 'update_batch', 'plan_cycles', 'add_holiday', 'list_users', 'create_cycles'].some(n => tNames.includes(n)));
   ok('create_cycles is gone (plan_cycles replaces it)', !aNames.includes('create_cycles') && aNames.includes('plan_cycles'));
   ok('trainer sees add_students / edit_student / set_batch_plan', ['add_students', 'edit_student', 'set_batch_plan'].every(n => tNames.includes(n)));
-  ok('no tool can delete', !aNames.some(n => /delete|remove_/.test(n)));
+  ok('only remove_student can delete (and it previews first)', aNames.filter(n => /delete|remove_/.test(n)).join() === 'remove_student');
   ok('trainer calling admin tool anyway → refused', (await call(cT, 'create_user', { name: 'X Y', email: 'x@y.com' })).isError);
 
   console.log('\n2. Users');
@@ -269,6 +269,32 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
     ok('get_top_students (trainer, own batches only)', !top.isError && top.data.students.length > 0 && top.data.students.every(s => mine.includes(s.batch.name)), mine);
     const rules = await yes(cA, 'set_top_student_rules', { excellent: 85 });
     ok('set_top_student_rules saved', rules.saved.data?.saved && (await call(cA, 'get_top_students', {})).data.weights.excellent === 85, rules.saved.text?.slice(0, 300));
+  }
+
+  console.log('\n8. Remove a student (wrongly listed in a second track)');
+  {
+    const CycleMark = require('../models/CycleMark');
+    const DailyLog = require('../models/DailyLog');
+    const wrong = await Student.create({ name: 'Two Track', roll: 'RM1', batch: da._id, semester: sem._id });
+    const right = await Student.create({ name: 'Two Track', roll: 'RM1', batch: mern._id, semester: sem._id });
+    await DailyLog.create({ batch: da._id, semester: sem._id, date: new Date('2026-10-05'), status: 'done', attendanceTaken: true, attendance: [{ student: wrong._id, present: false }] });
+    const r = await yes(cT, 'remove_student', { student_ids: [String(wrong._id)] });
+    ok('preview shows the other batch', r.preview.data?.changes?.[0]?.alsoIn?.includes('Full Stack'), r.preview.text?.slice(0, 300));
+    ok('trainer of the batch removes it', r.saved.data?.saved && !(await Student.exists({ _id: wrong._id })), r.saved.text?.slice(0, 300));
+    ok('the record in the other batch stays', !!(await Student.exists({ _id: right._id })));
+    ok('their attendance tick is gone', !(await DailyLog.exists({ 'attendance.student': wrong._id })));
+    const other = await Batch.create({ name: 'Other Batch', track: 'X', semester: sem._id, trainers: [saif._id] });
+    const stranger = await Student.create({ name: 'Not Yours', roll: 'RM3', batch: other._id, semester: sem._id });
+    ok('a trainer cannot remove from someone else\'s batch', (await call(cT, 'remove_student', { student_ids: [String(stranger._id)] })).isError && !!(await Student.exists({ _id: stranger._id })));
+    const marked = await Student.create({ name: 'Has Marks', roll: 'RM2', batch: da._id, semester: sem._id });
+    const cyc = await Cycle.findOne({ batch: da._id });
+    await CycleMark.create({ cycle: cyc._id, batch: da._id, semester: sem._id, student: marked._id, status: 'evaluated', project: 50, assessment: 40 });
+    const blocked = await call(cA, 'remove_student', { student_ids: [String(marked._id)] });
+    ok('a record with marks is refused', blocked.isError && /mark/.test(blocked.text), blocked.text);
+    ok('only the admin can force', (await call(cT, 'remove_student', { student_ids: [String(marked._id)], force: true })).isError);
+    const f = await yes(cA, 'remove_student', { student_ids: [String(marked._id)], force: true });
+    ok('admin force removes it with its marks', f.saved.data?.saved && !(await Student.exists({ _id: marked._id })) && !(await CycleMark.exists({ student: marked._id })), f.saved.text?.slice(0, 300));
+    ok('unknown id is refused', (await call(cA, 'remove_student', { student_ids: ['6a0000000000000000000000'] })).isError);
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

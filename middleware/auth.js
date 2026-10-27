@@ -34,6 +34,8 @@ exports.protect = async (req, res, next) => {
     }
     if (!user || !user.isActive)
       return res.status(401).json({ message: 'User not found or inactive' });
+    if ((decoded.v || 0) !== (user.tokenVersion || 0))
+      return res.status(401).json({ message: 'Your password was changed. Please sign in again.' });
 
     const org = tenant.currentOrg();
     const role = exports.roleIn(user, org);

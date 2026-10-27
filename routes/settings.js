@@ -108,4 +108,19 @@ router.put('/student-score', protect, superadminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// GET/PUT /api/settings/student-signup { mode: 'personal' | 'batch' }
+router.get('/student-signup', protect, async (req, res) => {
+  try { res.json({ mode: await require('../services/studentCodes').mode() }); }
+  catch (err) { res.status(500).json({ message: err.message }); }
+});
+router.put('/student-signup', protect, superadminOnly, async (req, res) => {
+  try {
+    const mode = req.body?.mode;
+    if (!['personal', 'batch'].includes(mode)) return res.status(400).json({ message: 'mode must be personal or batch' });
+    await Organization.updateOne({ _id: tenant.currentOrg() }, { $set: { 'settings.studentSignup': mode } });
+    require('../middleware/org').forget();
+    res.json({ mode });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
 module.exports = router;

@@ -24,6 +24,7 @@ const userSchema = new mongoose.Schema({
   // Platform owner (Minicimex): runs the owner console, can open any college.
   platformOwner: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },        // false = this login is off everywhere
+  tokenVersion: { type: Number, default: 0 },        // bumped on password change/reset → older sign-ins end
 }, { timestamps: true });
 
 userSchema.index({ 'memberships.org': 1 });

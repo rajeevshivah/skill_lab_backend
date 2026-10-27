@@ -9,6 +9,7 @@ const ProjectSubmission = require('../models/ProjectSubmission');
 const { protect, canAccessBatch, noCotrainer, seesAll } = require('../middleware/auth');
 const studentMerge = require('../services/studentMerge');
 const tempRoll = require('../services/tempRoll');
+const files = require('../services/fileStore');
 const router  = express.Router();
 
 const MAX_IMPORT_ROWS = 1000;
@@ -58,7 +59,7 @@ router.get('/', protect, async (req, res) => {
       sem: s.sem, section: s.section, year: s.year,
       batch: s.batch, semester: s.semester, stats: s.stats,
       attendancePct: s.attendancePct, flagged: s.flagged,
-      hasPhoto: !!s.photo?.contentType,
+      hasPhoto: files.has(s.photo),
     }));
     res.json({ students: result, total: result.length });
   } catch (err) { res.status(500).json({ message: err.message }); }
@@ -149,8 +150,9 @@ router.post('/:id/move', protect, async (req, res) => {
 router.get('/:id/photo', protect, async (req, res) => {
   try {
     const s = await Student.findById(req.params.id).select('photo');
-    if (!s?.photo?.data) return res.status(404).json({ message: 'No photo' });
-    res.json({ photo: `data:${s.photo.contentType};base64,${s.photo.data}` });
+    const url = s && (files.publicUrl(s.photo) || await files.dataUrl(s.photo));
+    if (!url) return res.status(404).json({ message: 'No photo' });
+    res.json({ photo: url });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -181,7 +183,7 @@ router.post('/', protect, async (req, res) => {
     if (photo) {
       const p = sanitizePhoto(photo);
       if (p === null) return res.status(400).json({ message: 'Photo must be a JPG, PNG or WEBP under 400 KB.' });
-      photoDoc = p;
+      photoDoc = await files.store(p, 'photos');
     }
     const student = await Student.create({
       ...v.doc, batch, semester: batchDoc.semester, photo: photoDoc, addedBy: req.user._id,
@@ -321,7 +323,7 @@ router.put('/:id', protect, async (req, res) => {
       else {
         const p = sanitizePhoto(photo);
         if (p === null) return res.status(400).json({ message: 'Photo must be a JPG, PNG or WEBP under 400 KB.' });
-        existing.photo = p;
+        existing.photo = await files.store(p, 'photos');
       }
     }
     existing.updatedBy = req.user._id;

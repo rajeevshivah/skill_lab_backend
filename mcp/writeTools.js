@@ -14,6 +14,7 @@
 const { z } = require('zod');
 
 const Batch     = require('../models/Batch');
+const files     = require('../services/fileStore');
 const Student   = require('../models/Student');
 const CycleMark = require('../models/CycleMark');
 const CyclePlan = require('../models/CyclePlan');
@@ -355,7 +356,7 @@ writeTools.push(writeTool({
       return {
         rank: t.rank, student: s._id, name: s.name, roll: s.roll,
         github: t.github !== undefined ? t.github : (prev?.github || ''),
-        photo: prev?.photo?.data ? { data: prev.photo.data, contentType: prev.photo.contentType } : null,
+        photo: files.has(prev?.photo) ? { data: prev.photo.data || null, contentType: prev.photo.contentType, key: prev.photo.key || null } : null,
       };
     }).sort((a, b) => a.rank - b.rank);
 

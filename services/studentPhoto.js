@@ -10,6 +10,7 @@
 // ─────────────────────────────────────────────────────────────────────
 const Student = require('../models/Student');
 const Cycle = require('../models/Cycle');
+const files = require('./fileStore');
 
 const MAX_BYTES = 400 * 1024;          // the dashboard shrinks photos to ~30–60 KB first
 const TYPES = /^image\/(jpeg|png|webp)$/;
@@ -34,7 +35,7 @@ function parse(dataUrl, maxBytes = MAX_BYTES) {
 async function sync(studentId) {
   const s = await Student.findById(studentId).select('photo').lean();
   if (!s) return 0;
-  const photo = s.photo?.data ? { data: s.photo.data, contentType: s.photo.contentType } : { data: null, contentType: null };
+  const photo = files.has(s.photo) ? { data: s.photo.data || null, contentType: s.photo.contentType, key: s.photo.key || null } : { data: null, contentType: null, key: null };
   const cycles = await Cycle.find({ 'report.top3.student': studentId });
   for (const c of cycles) {
     for (const t of c.report.top3) if (String(t.student) === String(studentId)) t.photo = photo;
@@ -46,7 +47,7 @@ async function sync(studentId) {
 
 async function set(studentId, dataUrl) {
   const p = parse(dataUrl);
-  await Student.updateOne({ _id: studentId }, { $set: { photo: p || { data: null, contentType: null } } });
+  await Student.updateOne({ _id: studentId }, { $set: { photo: await files.store(p, 'photos') } });   // file storage when set up
   return { hasPhoto: !!p, hallOfFame: await sync(studentId) };
 }
 

@@ -29,6 +29,10 @@ const organizationSchema = new mongoose.Schema({
   },
   // College-level choices the admin can change (Settings)
   settings: {
+    // How students set up their sign-in the first time:
+    //   personal — roll + their own one-time code (from the trainer's list); a classmate cannot claim it
+    //   batch    — roll + the batch code shown in class (quicker, less safe)
+    studentSignup: { type: String, enum: ['personal', 'batch'], default: 'personal' },
     // Top students (services/topStudents.js): weights of the score out of 100,
     // and the cut-offs for the "Good" and "Excellent" labels.
     studentScore: {

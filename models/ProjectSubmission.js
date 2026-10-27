@@ -16,8 +16,9 @@ const projectSubmissionSchema = new mongoose.Schema({
     code:     { type: String, default: '' },
   }],
   screenshot: {
-    data:        { type: String, default: null, select: false },   // base64
+    data:        { type: String, default: null, select: false },   // base64 (when file storage is not set up)
     contentType: { type: String, default: null },
+    key:         { type: String, default: null },                  // in file storage (services/fileStore.js)
   },
   submittedAt: { type: Date, default: Date.now },   // last time it was (re)submitted
   late:        { type: Boolean, default: false },   // submitted after the window closed

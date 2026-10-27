@@ -8,36 +8,46 @@ const Student  = require('../models/Student');
 const Batch    = require('../models/Batch');
 const Cycle    = require('../models/Cycle');
 const ProjectSubmission = require('../models/ProjectSubmission');
-const { protect, canAccessBatch } = require('../middleware/auth');
+const { protect, canAccessBatch, seesAll } = require('../middleware/auth');
+const codes    = require('../services/studentCodes');
+const crypto   = require('crypto');
 const perf     = require('../services/performance');
 const sv       = require('../services/studentView');
+const files = require('../services/fileStore');
 const router   = express.Router();
 
 const ALPHA = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 async function newJoinCode(semester) {
   for (let i = 0; i < 20; i++) {
-    const c = Array.from({ length: 6 }, () => ALPHA[Math.floor(Math.random() * ALPHA.length)]).join('');
+    const c = Array.from({ length: 6 }, () => ALPHA[crypto.randomInt(ALPHA.length)]).join('');
     if (!(await Batch.exists({ semester, joinCode: c }))) return c;
   }
   throw new Error('Could not make a unique code');
 }
+// Changes: the batch's trainers (and admin). Reading: also management (viewer).
 async function guard(req, res, batchId) {
+  if (req.method === 'GET' && seesAll(req.user)) return true;
   if (!(await canAccessBatch(req.user, batchId))) { res.status(403).json({ message: 'Not your batch' }); return false; }
   return true;
 }
 
-// GET /api/student-admin/batch/:id — join code + who has set up their sign-in
+// GET /api/student-admin/batch/:id — how students set up (mode), the batch code,
+// each not-yet-set-up student's personal code (trainers/admin only), who has set up
 router.get('/batch/:id', protect, async (req, res) => {
   try {
     const b = await Batch.findById(req.params.id);
     if (!b) return res.status(404).json({ message: 'Batch not found' });
     if (!(await guard(req, res, b._id))) return;
     if (!b.joinCode) { b.joinCode = await newJoinCode(b.semester); await b.save(); }
-    const students = await Student.find({ batch: b._id }).select('name roll demo login.activatedAt login.lastLoginAt github photo.contentType').sort('roll').setOptions({ withDemo: true }).lean();
-    res.json({ joinCode: b.joinCode,
+    const mode = await codes.mode();
+    const students = await Student.find({ batch: b._id }).select('name roll rollTemporary demo login.activatedAt login.lastLoginAt github photo.contentType').sort('roll').setOptions({ withDemo: true }).lean();
+    const showCodes = mode === 'personal' && req.user.role !== 'viewer';
+    const codeOf = showCodes ? await codes.ensure(students.filter(s => !s.login?.activatedAt).map(s => s._id)) : new Map();
+    res.json({ mode, joinCode: mode === 'batch' ? b.joinCode : null,
       activated: students.filter(s => s.login?.activatedAt && !s.demo).length, total: students.filter(s => !s.demo).length,
-      students: students.map(s => ({ _id: s._id, name: s.name, roll: s.roll, github: s.github || '',
-        activated: !!s.login?.activatedAt, lastLoginAt: s.login?.lastLoginAt || null, hasPhoto: !!s.photo?.contentType, demo: !!s.demo })) });
+      students: students.map(s => ({ _id: s._id, name: s.name, roll: s.roll, rollTemporary: !!s.rollTemporary, github: s.github || '',
+        activated: !!s.login?.activatedAt, lastLoginAt: s.login?.lastLoginAt || null, hasPhoto: !!s.photo?.contentType, demo: !!s.demo,
+        ...(codeOf.has(String(s._id)) ? { setupCode: codeOf.get(String(s._id)) } : {}) })) });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -58,9 +68,27 @@ router.post('/student/:id/reset-password', protect, async (req, res) => {
     const s = await Student.findById(req.params.id);
     if (!s) return res.status(404).json({ message: 'Student not found' });
     if (!(await guard(req, res, s.batch))) return;
-    s.login = { passwordHash: null, activatedAt: null, lastLoginAt: s.login?.lastLoginAt || null };
+    // the password goes, every sign-in of theirs ends, and a fresh personal code is made
+    const setupCode = codes.make();
+    s.login = { passwordHash: null, activatedAt: null, lastLoginAt: s.login?.lastLoginAt || null,
+      setupCode, tokenVersion: (s.login?.tokenVersion || 0) + 1 };
     await s.save();
-    res.json({ ok: true, message: `${s.name} can now set up again with the batch code.` });
+    const mode = await codes.mode();
+    res.json({ ok: true, setupCode: mode === 'personal' ? setupCode : null,
+      message: mode === 'personal' ? `${s.name} can set up again with roll number + code ${setupCode}.` : `${s.name} can now set up again with the batch code.` });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// POST /api/student-admin/student/:id/new-code — a new personal setup code (the old one stops working)
+router.post('/student/:id/new-code', protect, async (req, res) => {
+  try {
+    const s = await Student.findById(req.params.id).select('+login.passwordHash');
+    if (!s) return res.status(404).json({ message: 'Student not found' });
+    if (!(await guard(req, res, s.batch))) return;
+    if (s.login?.passwordHash) return res.status(400).json({ message: `${s.name} has already set up. Use Reset password instead.` });
+    const setupCode = codes.make();
+    await Student.updateOne({ _id: s._id }, { $set: { 'login.setupCode': setupCode } });
+    res.json({ ok: true, setupCode });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -81,11 +109,12 @@ router.get('/cycle/:id/submissions', protect, async (req, res) => {
 // GET /api/student-admin/submission/:id/screenshot → { dataUrl }
 router.get('/submission/:id/screenshot', protect, async (req, res) => {
   try {
-    const x = await ProjectSubmission.findById(req.params.id).select('+screenshot.data batch screenshot.contentType');
+    const x = await ProjectSubmission.findById(req.params.id).select('+screenshot.data batch screenshot.contentType screenshot.key');
     if (!x) return res.status(404).json({ message: 'Not found' });
     if (!(await guard(req, res, x.batch))) return;
-    if (!x.screenshot?.data) return res.status(404).json({ message: 'No screenshot' });
-    res.json({ dataUrl: `data:${x.screenshot.contentType};base64,${x.screenshot.data}` });
+    const dataUrl = await files.dataUrl(x.screenshot);
+    if (!dataUrl) return res.status(404).json({ message: 'No screenshot' });
+    res.json({ dataUrl });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 

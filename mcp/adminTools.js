@@ -709,6 +709,62 @@ admin(writeTool({
   },
 }));
 
+anyone(writeTool({
+  name: 'remove_student',
+  title: 'Remove students from a batch',
+  description: 'Admin, or a trainer of that batch (not co-trainers). Removes one or more student records — e.g. a student wrongly listed in a ' +
+    'second track, or someone who left. Their attendance ticks, class check-ins and project submissions in that batch go with the record; ' +
+    'a record of the same student in another batch is not touched. A record that has real marks or a Top-3 place is refused ' +
+    '(if the same roll is in the batch twice, use merge_students instead) unless an admin passes force=true, which deletes those marks too. ' +
+    'Cannot be undone. Find student ids with get_batch_roster or search.',
+  input: {
+    student_ids: z.array(z.string()).min(1).max(50).describe('Student record ids (the record in the batch you want them OUT of)'),
+    force: z.boolean().optional().describe('Admin only: also delete their marks / Top-3 places in this batch'),
+  },
+  async plan(args, me, ctx) {
+    const ids = [...new Set(args.student_ids.map(String))];
+    ids.forEach(id => requireId(id, 'student'));
+    if (args.force && me.role !== 'superadmin') throw new ToolError('Only the admin can use force.');
+    const CycleMark = require('../models/CycleMark');
+    const DailyLog = require('../models/DailyLog');
+    const students = await Student.find({ _id: { $in: ids } }).select('name roll batch login.activatedAt').populate('batch', 'name').setOptions({ withDemo: true });
+    const missing = ids.filter(id => !students.some(s => String(s._id) === id));
+    if (missing.length) throw new ToolError(`Not found: ${missing.join(', ')}`);
+    const problems = [], rows = [], warnings = ['This cannot be undone.'];
+    for (const s of students) {
+      if (!(await canAccessBatch(me, s.batch?._id))) { problems.push(`${s.name} (${s.roll}) is not in your batch`); continue; }
+      const marks = await CycleMark.countDocuments({ student: s._id, $or: [{ status: 'evaluated' }, { assessment: { $ne: null } }, { project: { $ne: null } }] });
+      const tops = await Cycle.countDocuments({ 'report.top3.student': s._id });
+      const logs = await DailyLog.find({ 'attendance.student': s._id }).select('attendance').lean();
+      const present = logs.filter(l => l.attendance.some(a => String(a.student) === String(s._id) && a.present)).length;
+      const elsewhere = s.roll ? await Student.find({ roll: new RegExp(`^\\s*${s.roll.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i'), _id: { $ne: s._id } })
+        .select('batch').populate('batch', 'name').lean() : [];
+      const sameBatch = elsewhere.some(o => String(o.batch?._id) === String(s.batch?._id));
+      if ((marks || tops) && !args.force)
+        problems.push(`${s.name} (${s.roll}) has ${marks} mark(s)${tops ? ` and ${tops} Top-3 place(s)` : ''} in ${s.batch?.name}` +
+          (sameBatch ? ' and is in this batch twice — use merge_students' : ' — an admin can pass force=true to delete them anyway'));
+      if (marks || tops) warnings.push(`${s.name}: ${marks} mark(s)${tops ? `, ${tops} Top-3 place(s)` : ''} will be deleted.`);
+      if (s.login?.activatedAt) warnings.push(`${s.name} had set up a student sign-in on this record; it will stop working.`);
+      if (!elsewhere.length) warnings.push(`${s.name} (${s.roll}) is in no other batch — after this they are not on the platform at all.`);
+      rows.push({ id: String(s._id), name: s.name, roll: s.roll, batch: s.batch?.name, presentDays: present, marks, top3: tops,
+        alsoIn: [...new Set(elsewhere.map(o => o.batch?.name).filter(Boolean))] });
+    }
+    if (problems.length) throw new ToolError('Nothing removed — ' + problems.join('; '));
+    return {
+      summary: `Remove ${rows.length} student record(s): ${rows.map(r => `${r.name} (${r.roll}) from ${r.batch}`).join(', ')}`,
+      changes: rows, warnings,
+      apply: async () => {
+        const done = [];
+        for (const r of rows) {
+          unwrap(await ctx.api('DELETE', `/api/students/${r.id}${args.force ? '?force=1' : ''}`));
+          done.push(`${r.name} (${r.roll}) removed from ${r.batch}`);
+        }
+        return { removed: done };
+      },
+    };
+  },
+}));
+
 admin({
   name: 'list_duplicate_students',
   title: 'Find duplicate roll numbers',

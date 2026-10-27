@@ -7,6 +7,7 @@ const CycleMark = require('../models/CycleMark');
 const ProjectSubmission = require('../models/ProjectSubmission');
 const ClassPulse = require('../models/ClassPulse');
 const { FeedbackWindow, Feedback, QUESTIONS } = require('../models/Feedback');
+const files = require('./fileStore');
 const perf = require('./performance');
 const Holiday = require('../models/Holiday');
 
@@ -116,7 +117,7 @@ async function studentHome(s) {
   // Hall of Fame finishes (every cycle where the student is in the Top 3)
   const tops = await Cycle.find({ 'report.top3.student': s._id }).select('number report.top3.rank report.top3.student').sort('startDate').lean();
   const achievements = tops.map(c => ({ cycle: c.number, rank: c.report.top3.find(t => String(t.student) === String(s._id))?.rank }));
-  const photo = s.photo?.data ? `data:${s.photo.contentType};base64,${s.photo.data}` : null;
+  const photo = files.publicUrl(s.photo) || await files.dataUrl(s.photo);   // storage link, or the image itself
 
   return {
     student: { id: s._id, name: s.name, roll: s.roll, github: s.github || '', course: s.course, sem: s.sem, section: s.section, photo, demo: !!s.demo },
