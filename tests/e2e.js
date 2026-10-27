@@ -301,7 +301,7 @@ const step = (t) => console.log('\n— ' + t);
 
   step('Class health: one view of every class, with filters');
   at('2027-01-21', '10:00');
-  r = await http('GET', `/api/meeting/health?from=2027-01-04&to=2027-01-18&batches=${A._id}`, { token: T(lucky) });
+  r = await http('GET', `/api/meeting/health?from=2027-01-04&to=2027-01-18&batches=${A._id}`, { token: T(admin) });
   const hA = r.body.batches?.[0];
   const st = (d) => hA.classes.find(c => c.date === d);
   ok('only the filtered batch', r.status === 200 && r.body.batches.length === 1 && hA.batch === 'Full Stack', r.body);
@@ -314,8 +314,12 @@ const step = (t) => console.log('\n— ' + t);
   ok('summary counts', hA.summary.missing === 1 && hA.summary.disagree === 1 && hA.summary.holidays === 2 && hA.summary.answers > 0, hA.summary);
   r = await http('GET', `/api/meeting/health?from=2027-01-04&to=2027-01-18&trainer=${deepu._id}`, { token: T(admin) });
   ok('trainer filter: only Deepu\'s batch', r.body.batches.length === 1 && r.body.batches[0].batch === 'Full Stack');
-  r = await http('GET', '/api/meeting/health?from=2027-01-04&to=2027-01-18', { token: T(lucky) });
-  ok('everyone sees all batches; own ones marked', r.body.batches.length === 2 && r.body.batches.find(b => b.batch === 'BCA 1st').mine && !r.body.batches.find(b => b.batch === 'Full Stack').mine);
+  r = await http('GET', '/api/meeting/health?from=2027-01-04&to=2027-01-18', { token: T(admin) });
+  ok('admin sees every batch', r.body.batches.length === 2 && r.body.seesAll === true);
+  r = await http('GET', `/api/meeting/health?from=2027-01-04&to=2027-01-18&trainer=${deepu._id}`, { token: T(lucky) });
+  ok('a trainer sees only own batches (even asking for another trainer\'s)', r.body.batches.length === 1 && r.body.batches[0].batch === 'BCA 1st' && r.body.batches[0].mine && r.body.seesAll === false, r.body.batches);
+  r = await http('GET', `/api/meeting/health?from=2027-01-04&to=2027-01-18&batches=${A._id}`, { token: T(lucky) });
+  ok('…and not another batch by id', r.body.batches.length === 0);
   ok('cycle periods offered as quick picks', r.body.periods.length >= 1 && r.body.periods[0].start === '2027-01-04', r.body.periods);
   ok('over 120 days refused', (await http('GET', '/api/meeting/health?from=2027-01-01&to=2027-06-30', { token: T(lucky) })).status === 400);
 

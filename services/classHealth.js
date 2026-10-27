@@ -4,6 +4,7 @@
 //  students said (covered %, understanding), plus flags. Summed per batch and
 //  over everything shown. Used by Meetings → Class health and the AI tool
 //  get_class_health. A day, a week, a whole cycle — any range up to 120 days.
+//  Admin and management see every batch; a trainer sees only their own.
 //
 //  Per class `state`:
 //    holiday · upcoming · open (today, not logged yet) · missing (past, no log)
@@ -20,6 +21,7 @@ const Semester  = require('../models/Semester');
 const perf      = require('./performance');
 const sv        = require('./studentView');
 const logRule   = require('./logRule');
+const { seesAll } = require('../middleware/auth');
 
 const isYmd = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 const sid = (x) => x == null ? '' : String(x._id || x);
@@ -60,15 +62,19 @@ async function healthView(user, q = {}) {
   const sem = await Semester.findOne({ status: 'active' }).lean();
   if (!sem) return { from, to, today, batches: [], totals: summarise([]), periods: [] };
 
+  // Admin and management see every batch; a trainer only their own batches.
+  const all = seesAll(user);
   const bq = { semester: sem._id };
   const ids = String(q.batches || '').split(',').filter(x => /^[a-f0-9]{24}$/.test(x));
   if (ids.length) bq._id = { $in: ids };
-  if (/^[a-f0-9]{24}$/.test(q.trainer || '')) bq.trainers = q.trainer;
-  const [batches, allCycles, myIds] = await Promise.all([
+  if (!all) bq.trainers = user._id;
+  else if (/^[a-f0-9]{24}$/.test(q.trainer || '')) bq.trainers = q.trainer;
+  const [batches, myIds] = await Promise.all([
     Batch.find(bq).select('name track trainers schedule.days').populate('trainers', 'name isActive').sort('name').lean(),
-    Cycle.find({ semester: sem._id }).select('batch number startDate endDate track.projectDate track.deadline').sort('startDate').lean(),
     Batch.find({ semester: sem._id, trainers: user._id }).select('_id').lean(),
   ]);
+  const allCycles = await Cycle.find({ semester: sem._id, ...(all ? {} : { batch: { $in: myIds.map(b => b._id) } }) })
+    .select('batch number startDate endDate track.projectDate track.deadline').sort('startDate').lean();
   const mine = new Set(myIds.map(b => sid(b._id)));
   const bset = new Set(batches.map(b => sid(b._id)));
   const cycles = allCycles.filter(c => bset.has(sid(c.batch)) && perf.dayYmd(c.startDate) <= to && perf.dayYmd(c.endDate) >= from);
@@ -154,7 +160,7 @@ async function healthView(user, q = {}) {
   }
   const periods = [...per.values()].sort((a, b) => a.start.localeCompare(b.start)).map(e => ({ key: e.key, start: e.start, end: e.end, numbers: [...e.numbers].sort((a, b) => a - b) }));
 
-  return { from, to, today, batches: out, totals: summarise(out.flatMap(b => b.classes)), periods };
+  return { from, to, today, seesAll: all, batches: out, totals: summarise(out.flatMap(b => b.classes)), periods };
 }
 
 module.exports = { healthView, summarise };
