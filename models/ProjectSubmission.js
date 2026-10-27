@@ -8,6 +8,13 @@ const projectSubmissionSchema = new mongoose.Schema({
   githubUrl:{ type: String, default: '' },
   liveUrl:  { type: String, default: '' },
   note:     { type: String, default: '' },
+  // Code pasted by the student (when they could not push to GitHub, or as well
+  // as a link): one entry per file. Lists leave `code` out; it loads on demand.
+  files: [{ _id: false,
+    name:     { type: String, default: '' },        // "App.jsx"
+    language: { type: String, default: 'text' },    // services/projectCode.js LANGUAGES
+    code:     { type: String, default: '' },
+  }],
   screenshot: {
     data:        { type: String, default: null, select: false },   // base64
     contentType: { type: String, default: null },

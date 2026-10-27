@@ -82,7 +82,7 @@ async function studentHome(s) {
     project = {
       projectDay: w.projectDay, openedAt: w.from, closesAt: w.until,
       state: w.open ? 'open' : 'closed',
-      submission: sub ? { githubUrl: sub.githubUrl, liveUrl: sub.liveUrl, note: sub.note, submittedAt: sub.submittedAt, late: sub.late, hasScreenshot: !!sub.screenshot?.contentType } : null,
+      submission: sub ? submissionView(sub) : null,
     };
   }
 
@@ -164,4 +164,10 @@ async function pulseFinder(ranges) {
   return (batchId, from, to) => summarisePulse(rows.filter(r => String(r.batch) === String(batchId) && r.date >= from && r.date <= to));
 }
 
-module.exports = { holidayOn, holidaysBetween, todayIST, fmtIST, submitWindow, currentCycle, classOn, ratableTrainers, studentHome, pulseSummary, holidayFinder, pulseFinder, IST };
+// The student's own submission as their page shows it (their code included, so they can edit it).
+function submissionView(sub) {
+  return { githubUrl: sub.githubUrl, liveUrl: sub.liveUrl, note: sub.note, submittedAt: sub.submittedAt, late: sub.late,
+    hasScreenshot: !!sub.screenshot?.contentType, files: (sub.files || []).map(f => ({ name: f.name, language: f.language, code: f.code })) };
+}
+
+module.exports = { submissionView, holidayOn, holidaysBetween, todayIST, fmtIST, submitWindow, currentCycle, classOn, ratableTrainers, studentHome, pulseSummary, holidayFinder, pulseFinder, IST };

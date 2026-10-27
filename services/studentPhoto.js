@@ -14,13 +14,14 @@ const Cycle = require('../models/Cycle');
 const MAX_BYTES = 400 * 1024;          // the dashboard shrinks photos to ~30–60 KB first
 const TYPES = /^image\/(jpeg|png|webp)$/;
 
-// data URL → { data, contentType } | null (remove) ; throws on a bad image
-function parse(dataUrl) {
+// data URL → { data, contentType } | null (remove) ; throws on a bad image.
+// maxBytes: 400 KB for profile photos; project screenshots pass their own limit.
+function parse(dataUrl, maxBytes = MAX_BYTES) {
   if (dataUrl == null || dataUrl === '') return null;
   const m = String(dataUrl).match(/^data:(image\/[a-z]+);base64,([A-Za-z0-9+/=]+)$/);
   if (!m || !TYPES.test(m[1])) throw new Error('Use a JPG, PNG or WEBP photo.');
   const buf = Buffer.from(m[2], 'base64');
-  if (buf.length > MAX_BYTES) throw new Error('Photo is too large (max 400 KB).');
+  if (buf.length > maxBytes) throw new Error(`Image is too large (max ${Math.round(maxBytes / 1024)} KB).`);
   // The bytes must really be that kind of image (it goes on a public page)
   const real = (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) ? 'image/jpeg'
     : buf.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47])) ? 'image/png'

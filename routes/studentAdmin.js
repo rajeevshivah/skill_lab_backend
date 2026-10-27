@@ -2,6 +2,7 @@
 //  /api/student-admin — staff side of student accounts and activity.
 //  Trainers act on their own batches; the superadmin on all.
 // ─────────────────────────────────────────────────────────────────────
+const projectCode = require('../services/projectCode');
 const express  = require('express');
 const Student  = require('../models/Student');
 const Batch    = require('../models/Batch');
@@ -69,11 +70,11 @@ router.get('/cycle/:id/submissions', protect, async (req, res) => {
     const c = await Cycle.findById(req.params.id);
     if (!c) return res.status(404).json({ message: 'Cycle not found' });
     if (!(await guard(req, res, c.batch))) return;
-    const subs = await ProjectSubmission.find({ cycle: c._id }).lean();
+    const subs = await ProjectSubmission.find({ cycle: c._id }).lean();   // code is small text; only names + line counts go out here
     const w = sv.submitWindow(c);
     res.json({ window: w,
       submissions: subs.map(x => ({ _id: x._id, student: x.student, githubUrl: x.githubUrl, liveUrl: x.liveUrl, note: x.note,
-        submittedAt: x.submittedAt, late: x.late, hasScreenshot: !!x.screenshot?.contentType })) });
+        submittedAt: x.submittedAt, late: x.late, hasScreenshot: !!x.screenshot?.contentType, files: projectCode.meta(x.files) })) });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -85,6 +86,16 @@ router.get('/submission/:id/screenshot', protect, async (req, res) => {
     if (!(await guard(req, res, x.batch))) return;
     if (!x.screenshot?.data) return res.status(404).json({ message: 'No screenshot' });
     res.json({ dataUrl: `data:${x.screenshot.contentType};base64,${x.screenshot.data}` });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// GET /api/student-admin/submission/:id/code → { files: [{ name, language, code }] }
+router.get('/submission/:id/code', protect, async (req, res) => {
+  try {
+    const x = await ProjectSubmission.findById(req.params.id).select('files batch student').populate('student', 'name roll').lean();
+    if (!x) return res.status(404).json({ message: 'Not found' });
+    if (!(await guard(req, res, x.batch))) return;
+    res.json({ student: x.student ? { name: x.student.name, roll: x.student.roll } : null, files: x.files || [] });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 

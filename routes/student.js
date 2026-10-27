@@ -10,6 +10,7 @@
 //  day), the after-class "was today's plan covered?" question, and trainer
 //  feedback forms the admin has opened. Never other students' data.
 // ─────────────────────────────────────────────────────────────────────
+const projectCode = require('../services/projectCode');
 const express  = require('express');
 const jwt      = require('jsonwebtoken');
 const bcrypt   = require('bcryptjs');
@@ -136,7 +137,10 @@ router.put('/photo', protectStudent, async (req, res) => {
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
-// POST /api/student/submission { cycleId, githubUrl, liveUrl, note, screenshot: { data(base64), contentType } }
+// POST /api/student/submission { cycleId, githubUrl, liveUrl, note, files: [{ name, language, code }], screenshot: { data(base64), contentType } }
+// A GitHub link OR pasted code (or both). The screenshot is optional; the phone
+// shrinks it first and the server refuses anything over 300 KB or not a real image.
+const SHOT_MAX = 300 * 1024;
 router.post('/submission', protectStudent, async (req, res) => {
   try {
     if (req.student.demo) return res.status(201).json({ ok: true, demo: true, message: 'Demo account — this was not saved.' });
@@ -146,18 +150,20 @@ router.post('/submission', protectStudent, async (req, res) => {
     const w = sv.submitWindow(cycle), now = new Date();
     if (!w.open) return res.status(400).json({ message: 'Submission is closed. Your trainer opens it in class on project day.' });
     const gh = String(b.githubUrl || '').trim(), live = String(b.liveUrl || '').trim();
-    if (!/^https?:\/\/(www\.)?github\.com\/.+/.test(gh)) return res.status(400).json({ message: 'Give the GitHub link of your project repository (https://github.com/…).' });
+    let files;
+    try { files = projectCode.clean(b.files); } catch (e) { return res.status(400).json({ message: e.message }); }
+    if (!gh && !files.length) return res.status(400).json({ message: 'Give your GitHub repository link, or paste your code below.' });
+    if (gh && !/^https?:\/\/(www\.)?github\.com\/.+/.test(gh)) return res.status(400).json({ message: 'The GitHub link must look like https://github.com/yourname/project' });
     if (live && !/^https?:\/\/.+/.test(live)) return res.status(400).json({ message: 'The live link must start with https://' });
-    const set = { batch: s.batch, githubUrl: gh, liveUrl: live, note: String(b.note || '').slice(0, 500), submittedAt: now, late: sv.todayIST() > w.projectDay };
+    const set = { batch: s.batch, githubUrl: gh, liveUrl: live, note: String(b.note || '').slice(0, 500), files, submittedAt: now, late: sv.todayIST() > w.projectDay };
     if (b.screenshot?.data) {
-      if (!/^image\/(png|jpe?g|webp)$/.test(b.screenshot.contentType || '')) return res.status(400).json({ message: 'Screenshot must be PNG, JPG or WEBP.' });
-      if (String(b.screenshot.data).length > 2_000_000) return res.status(400).json({ message: 'Screenshot is too large (max ~1.5 MB).' });
-      set.screenshot = { data: String(b.screenshot.data), contentType: b.screenshot.contentType };
+      try { set.screenshot = require('../services/studentPhoto').parse(`data:${b.screenshot.contentType};base64,${b.screenshot.data}`, SHOT_MAX); }
+      catch (e) { return res.status(400).json({ message: e.message.replace('photo', 'screenshot') }); }
     }
     await ProjectSubmission.updateOne({ cycle: cycle._id, student: s._id }, { $set: set }, { upsert: true });
-    await require('../services/studentStats').recompute([s._id]);   // Placement: projects submitted
+    await require('../services/studentStats').recompute([s._id]);   // Top students: projects submitted
     const sub = await ProjectSubmission.findOne({ cycle: cycle._id, student: s._id }).lean();
-    res.status(201).json({ ok: true, submission: { githubUrl: sub.githubUrl, liveUrl: sub.liveUrl, note: sub.note, submittedAt: sub.submittedAt, late: sub.late, hasScreenshot: !!sub.screenshot?.contentType } });
+    res.status(201).json({ ok: true, submission: sv.submissionView(sub) });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 

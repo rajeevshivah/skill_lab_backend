@@ -90,9 +90,18 @@ anyone(read({
 anyone(read({
   name: 'get_project_submissions',
   title: 'Project submissions of a cycle',
-  description: 'Whether student project submission is open, and every submission (GitHub, live link, late flag) for one cycle.',
+  description: 'Whether student project submission is open, and every submission (GitHub, live link, pasted code files with line counts, late flag) for one cycle. ' +
+    'To read a student\'s pasted code, use get_submission_code with the submission _id.',
   input: { cycle_id: objId },
   async run(a, api) { return unwrap(await api('GET', `/api/student-admin/cycle/${a.cycle_id}/submissions`)); },
+}));
+
+anyone(read({
+  name: 'get_submission_code',
+  title: 'Code a student pasted with their project',
+  description: 'The code files (name, language, code) a student pasted in their project submission — e.g. to review or check it. Give the submission _id from get_project_submissions.',
+  input: { submission_id: objId },
+  async run(a, api) { return unwrap(await api('GET', `/api/student-admin/submission/${a.submission_id}/code`)); },
 }));
 
 anyone(read({
