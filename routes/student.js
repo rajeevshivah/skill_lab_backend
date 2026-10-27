@@ -66,7 +66,7 @@ router.post('/activate', async (req, res) => {
     if (!batch) { fail(k); return res.status(400).json({ message: 'That batch code is not right. Check the code your trainer showed.' }); }
     const matches = await Student.find({ batch: batch._id, roll: rollRe(roll) }).select('+login.passwordHash').setOptions({ withDemo: true });
     if (!matches.length) { fail(k); return res.status(400).json({ message: 'This roll number is not in that batch. Ask your trainer to check the roster.' }); }
-    if (matches.length > 1) return res.status(409).json({ message: 'Two students have this roll number in the batch. Ask your trainer to fix it.' });
+    if (matches.length > 1) return res.status(409).json({ message: 'Your roll number is in this batch twice. Ask your trainer to tap "Merge" on the batch page, then set up again.' });
     const s = matches[0];
     if (s.login?.passwordHash) return res.status(409).json({ message: 'This roll number is already set up. Sign in, or ask your trainer to reset your password.' });
     s.login = { passwordHash: await bcrypt.hash(String(password), 10), activatedAt: new Date(), lastLoginAt: new Date() };

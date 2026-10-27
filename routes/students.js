@@ -3,8 +3,12 @@ const Student   = require('../models/Student');
 const Batch     = require('../models/Batch');
 const CycleMark = require('../models/CycleMark');
 const Topper    = require('../models/Topper');
-const { protect, canAccessBatch, noCotrainer, seesAll, superadminOnly } = require('../middleware/auth');
+const DailyLog  = require('../models/DailyLog');
+const ClassPulse = require('../models/ClassPulse');
+const ProjectSubmission = require('../models/ProjectSubmission');
+const { protect, canAccessBatch, noCotrainer, seesAll } = require('../middleware/auth');
 const studentMerge = require('../services/studentMerge');
+const tempRoll = require('../services/tempRoll');
 const router  = express.Router();
 
 const MAX_IMPORT_ROWS = 1000;
@@ -50,7 +54,7 @@ router.get('/', protect, async (req, res) => {
     if (req.query.semester) filter.semester = req.query.semester;
     const students = await Student.find(filter).select('-photo.data').sort('roll name');
     const result = students.map(s => ({
-      _id: s._id, name: s.name, roll: s.roll, course: s.course,
+      _id: s._id, name: s.name, roll: s.roll, rollTemporary: !!s.rollTemporary, course: s.course,
       sem: s.sem, section: s.section, year: s.year,
       batch: s.batch, semester: s.semester, stats: s.stats,
       attendancePct: s.attendancePct, flagged: s.flagged,
@@ -105,10 +109,14 @@ router.get('/duplicates', protect, async (req, res) => {
 // POST /api/students/:id/merge  { into, preview }  (admin)
 // :id is the duplicate record; everything it carries moves to `into`, then it is
 // removed (services/studentMerge.js). preview=true only counts what would move.
-router.post('/:id/merge', protect, superadminOnly, async (req, res) => {
+// The batch's trainers may merge their own students too (not co-trainers).
+router.post('/:id/merge', protect, noCotrainer, async (req, res) => {
   try {
     const { into, preview } = req.body || {};
     if (!into) return res.status(400).json({ message: 'Which record to keep (into)?' });
+    const dup = await Student.findById(req.params.id).select('batch').setOptions({ withDemo: true });
+    if (!dup) return res.status(404).json({ message: 'Student not found' });
+    if (!(await canAccessBatch(req.user, dup.batch))) return res.status(403).json({ message: 'You can only merge students in your own batch' });
     const out = preview ? await studentMerge.preview(into, req.params.id) : await studentMerge.merge(into, req.params.id, req.user._id);
     res.json(out);
   } catch (err) {
@@ -163,6 +171,10 @@ router.post('/', protect, async (req, res) => {
       const clash = await Student.findOne({ batch, roll: rollRe(v.doc.roll) });
       if (clash)
         return res.status(400).json({ message: `Roll ${v.doc.roll} already belongs to ${clash.name} in this batch.` });
+    } else {
+      // no roll yet (lateral entry, late admission) → a temporary ID to sign in with
+      [v.doc.roll] = await tempRoll.issue(1);
+      v.doc.rollTemporary = true;
     }
 
     let photoDoc = { data: null, contentType: null };
@@ -240,10 +252,11 @@ router.post('/bulk', protect, async (req, res) => {
       }));
     }
 
+    const noRoll = docs.filter(d => !d.roll);
     if (preview) {
       return res.json({
         preview: true,
-        willImport: docs.length,
+        willImport: docs.length, temporaryIds: noRoll.length,   // rows with no roll get a TMP- ID
         sample: docs.slice(0, 5).map(d => ({
           roll: d.roll, name: d.name, course: d.course, sem: d.sem, section: d.section,
         })),
@@ -252,9 +265,10 @@ router.post('/bulk', protect, async (req, res) => {
       });
     }
 
+    if (noRoll.length) (await tempRoll.issue(noRoll.length)).forEach((r, i) => { noRoll[i].roll = r; noRoll[i].rollTemporary = true; });
     const created = docs.length ? await Student.insertMany(docs) : [];
     res.status(201).json({
-      imported: created.length,
+      imported: created.length, temporaryIds: noRoll.map(d => ({ name: d.name, roll: d.roll })),
       skipped, skippedCount: skipped.length,
       duplicates, duplicateCount: duplicates.length,
     });
@@ -293,6 +307,10 @@ router.put('/:id', protect, async (req, res) => {
         if (clash)
           return res.status(400).json({ message: `Roll ${v.doc.roll} already belongs to ${clash.name} in this batch.` });
       }
+      // a roll cleared → a new temporary ID (a student always has something to sign in with);
+      // a real roll typed over a temporary one → it becomes the student's roll, sign-in keeps working
+      if (!v.doc.roll) { [v.doc.roll] = await tempRoll.issue(1); v.doc.rollTemporary = true; }
+      else if (v.doc.roll.toLowerCase() !== (existing.roll || '').toLowerCase()) v.doc.rollTemporary = tempRoll.isTemp(v.doc.roll);
       Object.assign(existing, v.doc);
     }
 
@@ -315,9 +333,12 @@ router.put('/:id', protect, async (req, res) => {
 });
 
 // DELETE /api/students/:id
-// Refuses when the student carries history (marks or top-3 finishes) — deleting
-// them orphans those records. Fix details with PUT instead. A superadmin can
-// pass ?force=1 to delete the student and their history together.
+// Refuses when the student carries real history (evaluated marks, a remark, or
+// top-3 finishes) — fix details with PUT, or MERGE a duplicate instead. Empty
+// "not evaluated" mark rows (a marks sheet saves one for every student) don't
+// count and go with the student. A superadmin can pass ?force=1 to delete the
+// student and their history together. Their attendance ticks, class check-ins
+// and project submissions are removed too, so batch numbers stay right.
 router.delete('/:id', protect, noCotrainer, async (req, res) => {
   try {
     const student = await Student.findById(req.params.id);
@@ -326,26 +347,35 @@ router.delete('/:id', protect, noCotrainer, async (req, res) => {
       return res.status(403).json({ message: 'You can only delete students in your batch' });
 
     const force = req.query.force === '1' && req.user.role === 'superadmin';
+    const realMark = { student: student._id, $or: [{ status: 'evaluated' }, { assessment: { $ne: null } }, { project: { $ne: null } }, { remark: { $nin: ['', null] } }] };
     const [markCount, oldTops, cycleTops] = await Promise.all([
-      CycleMark.countDocuments({ student: student._id }),
+      CycleMark.countDocuments(realMark),
       Topper.countDocuments({ student: student._id }),
       require('../models/Cycle').countDocuments({ 'report.top3.student': student._id }),
     ]);
     const topperCount = oldTops + cycleTops;
 
     if ((markCount || topperCount) && !force) {
+      const twin = student.roll && await Student.exists({ batch: student.batch, roll: rollRe(student.roll), _id: { $ne: student._id } });
       return res.status(409).json({
-        message: `${student.name} has ${markCount} cycle mark(s) and ${topperCount} top-3 finish(es). ` +
-                 `Edit their details instead of removing them — deleting loses that history.`,
-        markCount, topperCount, needsForce: true,
+        message: `${student.name} has ${markCount} mark(s) and ${topperCount} top-3 finish(es). ` +
+                 (twin ? 'This roll is in the batch twice — use Merge so nothing is lost.' : 'Edit their details instead of removing them — deleting loses that history.'),
+        markCount, topperCount, needsForce: true, duplicate: !!twin,
       });
     }
 
-    if (force) {
-      await CycleMark.deleteMany({ student: student._id });
-      await Topper.deleteMany({ student: student._id });
+    await CycleMark.deleteMany({ student: student._id });            // empty rows (and real ones when forced)
+    if (force) await Topper.deleteMany({ student: student._id });
+    for (const log of await DailyLog.find({ 'attendance.student': student._id })) {   // their attendance ticks
+      log.attendance = log.attendance.filter(a => String(a.student) !== String(student._id));
+      await log.save();
     }
-    await Student.findByIdAndDelete(req.params.id);
+    await Promise.all([
+      ClassPulse.deleteMany({ student: student._id }),
+      ProjectSubmission.deleteMany({ student: student._id }),
+    ]);
+    await Student.deleteOne({ _id: student._id });
+    await require('../services/attendanceStats').recomputeBatchStats(student.batch);
     res.json({ message: 'Student deleted', removedMarks: force ? markCount : 0 });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });

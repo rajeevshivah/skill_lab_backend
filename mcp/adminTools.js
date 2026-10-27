@@ -620,7 +620,8 @@ anyone(writeTool({
   description:
     'Add one or many students to a batch (roll, name, course, sem, section). Same checks as the website import: rows with no ' +
     'name or a bad roll are skipped, rolls already in this batch are skipped, rolls that exist in ANOTHER batch are added and ' +
-    'flagged (resolve on the Duplicates page). Trainers can add only to their own batches. Max 1000 per call.',
+    'flagged (resolve on the Duplicates page). A student with no roll yet (lateral entry, late admission) gets a temporary ID ' +
+    '(TMP-XXXXX) to sign in with — give it to them; when the real roll arrives, change it with edit_student. Trainers can add only to their own batches. Max 1000 per call.',
   input: {
     batch_id: z.string(),
     students: z.array(z.object({
@@ -640,10 +641,12 @@ anyone(writeTool({
       warnings: [
         ...(pv.skippedCount ? [`${pv.skippedCount} row(s) will be skipped.`] : []),
         ...(pv.duplicateCount ? [`${pv.duplicateCount} roll(s) are already in another batch — they'll be added and flagged on the Duplicates page.`] : []),
+        ...(pv.temporaryIds ? [`${pv.temporaryIds} student(s) have no roll — each gets a temporary ID (TMP-…) to sign in with.`] : []),
       ],
       apply: async () => {
         const out = unwrap(await ctx.api('POST', '/api/students/bulk', { batch: b._id, rows: args.students }));
-        return { added: out.imported, skipped: out.skippedCount, flaggedDuplicates: out.duplicateCount };
+        return { added: out.imported, skipped: out.skippedCount, flaggedDuplicates: out.duplicateCount,
+          ...(out.temporaryIds?.length ? { temporaryIds: out.temporaryIds, note: 'Give each student their temporary ID; they sign in with it and the batch code.' } : {}) };
       },
     };
   },
@@ -719,10 +722,10 @@ admin({
   },
 });
 
-admin(writeTool({
+anyone(writeTool({
   name: 'merge_students',
   title: 'Merge two records of the same student',
-  description: 'Superadmin only. When one student was added twice to the SAME batch (same roll, maybe a misspelt name), move everything ' +
+  description: 'Admin, or a trainer of that batch. When one student was added twice to the SAME batch (same roll, maybe a misspelt name), move everything ' +
     'from the duplicate record — marks, attendance, class check-ins, project submissions, feedback votes, Top-3 places, sign-in, photo — ' +
     'to the record you keep, then remove the duplicate. Where both have a mark for the same cycle, the evaluated one wins; attendance: present wins. ' +
     'Cannot be undone. Use list_duplicate_students to find pairs.',

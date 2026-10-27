@@ -3,6 +3,10 @@ const mongoose = require('mongoose');
 const studentSchema = new mongoose.Schema({
   name:    { type: String, required: true, trim: true },
   roll:    { type: String, default: '', trim: true },
+  // A temporary ID made by the platform (TMP-XXXXX) for a student who has no
+  // roll number yet (lateral entry, late admission). They sign in with it; when
+  // the real roll is entered it replaces it and the sign-in keeps working.
+  rollTemporary: { type: Boolean, default: false },
   // Academic identity
   course:  { type: String, default: '' },  // B.Tech / BCA
   sem:     { type: String, default: '' },  // "3rd Sem"

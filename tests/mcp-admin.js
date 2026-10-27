@@ -76,7 +76,7 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   const aNames = (await cA.listTools()).tools.map(t => t.name);
   const tNames = (await cT.listTools()).tools.map(t => t.name);
   ok('superadmin sees 61 tools', aNames.length === 61, aNames.length);
-  ok('trainer sees 36 tools (no admin ones)', tNames.length === 36, tNames.length);
+  ok('trainer sees 37 tools (no admin ones)', tNames.length === 37, tNames.length);
   ok('trainer does NOT see create_user / update_batch / plan_cycles / add_holiday', !['create_user', 'update_batch', 'plan_cycles', 'add_holiday', 'list_users', 'create_cycles'].some(n => tNames.includes(n)));
   ok('create_cycles is gone (plan_cycles replaces it)', !aNames.includes('create_cycles') && aNames.includes('plan_cycles'));
   ok('trainer sees add_students / edit_student / set_batch_plan', ['add_students', 'edit_student', 'set_batch_plan'].every(n => tNames.includes(n)));

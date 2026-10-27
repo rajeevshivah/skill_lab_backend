@@ -37,7 +37,7 @@ const day = (n) => perf.ymdToDay(shift(n));
   const rohit = await M('User').create({ name: 'Rohit', email: 'r@x.com', password: 'longpassword1', role: 'trainer' });
   const lucky = await M('User').create({ name: 'Lucky', email: 'l@x.com', password: 'longpassword1', role: 'trainer' });
   const sem = await M('Semester').create({ name: 'Odd', status: 'active' });
-  const DA = await M('Batch').create({ name: 'Data Analyst', track: 'Data Analysis', semester: sem._id, trainers: [rohit._id] });
+  const DA = await M('Batch').create({ name: 'Data Analyst', track: 'Data Analysis', semester: sem._id, trainers: [rohit._id], joinCode: 'DACODE' });
   const FS = await M('Batch').create({ name: 'Full Stack', track: 'MERN', semester: sem._id, trainers: [lucky._id] });
   const add = (b, name, roll, extra = {}) => M('Student').create({ name, roll, batch: b._id, semester: sem._id, ...extra });
 
@@ -73,7 +73,7 @@ const day = (n) => perf.ymdToDay(shift(n));
   ok('a trainer cannot see the report', (await http('GET', `/api/students/duplicates?semester=${sem._id}`, { token: T(rohit) })).status === 403);
 
   console.log('\n— Merge');
-  ok('trainer cannot merge', (await http('POST', `/api/students/${dupe._id}/merge`, { token: T(rohit), body: { into: keep._id } })).status === 403);
+  ok('a trainer of another batch cannot merge', (await http('POST', `/api/students/${dupe._id}/merge`, { token: T(lucky), body: { into: keep._id } })).status === 403);
   ok('records in two batches cannot be merged', (await http('POST', `/api/students/${fsStu._id}/merge`, { token: T(admin), body: { into: ok1._id } })).status === 400);
   r = await http('POST', `/api/students/${dupe._id}/merge`, { token: T(admin), body: { into: keep._id, preview: true } });
   ok('preview counts what moves, changes nothing', r.status === 200 && r.body.moves.marks === 1 && r.body.moves.attendanceDays === 2 && r.body.moves.top3 === 1 && await M('Student').exists({ _id: dupe._id }), r.body);
@@ -133,6 +133,46 @@ const day = (n) => perf.ymdToDay(shift(n));
   ok('admin saves marks-only rules', r.status === 200);
   r = await http('GET', '/api/students/top', { token: T(admin) });
   ok('scores follow the new rules', S('Saumya Jha').score === 85 && S('Saumya Jha').tier === 'good' && S('Aditi').score === 50 && S('Aditi').tier === 'good', r.body.students.slice(0, 4));
+
+  console.log('\n— Trainers fix their own roster');
+  const cot = await M('User').create({ name: 'Cot', email: 'c@x.com', password: 'longpassword1', role: 'cotrainer' });
+  await M('Batch').updateOne({ _id: DA._id }, { $addToSet: { trainers: cot._id } });
+  const tw1 = await add(DA, 'Vikas Kumar', '12425407145'), tw2 = await add(DA, 'Vikas Kumar', '12425407145');
+  // a saved marks sheet leaves an empty "not evaluated" row for everyone
+  await M('CycleMark').create({ cycle: c2._id, batch: DA._id, semester: sem._id, student: tw2._id, status: 'not-evaluated' });
+  await M('DailyLog').create({ batch: DA._id, semester: sem._id, date: day(-3), status: 'done', attendanceTaken: true,
+    attendance: [{ student: tw1._id, present: true }, { student: tw2._id, present: true }] });
+  r = await http('POST', '/api/student/activate', { body: { roll: '12425407145', code: 'DACODE', password: 'secret12' } });
+  ok('sign-up with a doubled roll says to merge', r.status === 409 && /Merge/.test(r.body.message), r.body);
+  ok('a co-trainer cannot merge', (await http('POST', `/api/students/${tw2._id}/merge`, { token: T(cot), body: { into: tw1._id } })).status === 403);
+  ok('another batch\'s trainer cannot merge', (await http('POST', `/api/students/${tw2._id}/merge`, { token: T(lucky), body: { into: tw1._id } })).status === 403);
+  r = await http('POST', `/api/students/${tw2._id}/merge`, { token: T(rohit), body: { into: tw1._id } });
+  ok('the batch trainer merges the pair', r.status === 200 && !(await M('Student').exists({ _id: tw2._id })), r.body);
+  r = await http('POST', '/api/student/activate', { body: { roll: '12425407145', code: 'DACODE', password: 'secret12' } });
+  ok('…then the student can set up', r.status === 201, r.body);
+  const gone = await add(DA, 'Wrong Entry', 'X999');
+  await M('CycleMark').create({ cycle: c2._id, batch: DA._id, semester: sem._id, student: gone._id, status: 'not-evaluated' });
+  await M('DailyLog').updateOne({ date: day(-3), batch: DA._id }, { $push: { attendance: { student: gone._id, present: true } } });
+  r = await http('DELETE', `/api/students/${gone._id}`, { token: T(rohit) });
+  ok('trainer removes a student who only has an empty mark row', r.status === 200, r.body);
+  ok('…their empty mark row and attendance tick go too', !(await M('CycleMark').exists({ student: gone._id })) && !(await M('DailyLog').findOne({ date: day(-3), batch: DA._id })).attendance.some(a => String(a.student) === String(gone._id)));
+  r = await http('DELETE', `/api/students/${keep._id}`, { token: T(rohit) });
+  ok('a student with real marks is still protected', r.status === 409);
+
+  console.log('\n— Lateral entry: temporary ID');
+  r = await http('POST', '/api/students', { token: T(rohit), body: { batch: DA._id, name: 'Lateral Lata', course: 'B.Tech', sem: '3' } });
+  const tmp = r.body.student;
+  ok('no roll → a temporary ID TMP-XXXXX', r.status === 201 && /^TMP-[A-Z2-9]{5}$/.test(tmp.roll) && tmp.rollTemporary === true, r.body);
+  r = await http('POST', '/api/student/activate', { body: { roll: tmp.roll.toLowerCase(), code: 'DACODE', password: 'latapass1' } });
+  ok('the student signs up with the temporary ID', r.status === 201, r.body);
+  r = await http('PUT', `/api/students/${tmp._id}`, { token: T(rohit), body: { roll: '2503840100099' } });
+  ok('trainer types the real roll over it', r.status === 200 && r.body.student.roll === '2503840100099' && r.body.student.rollTemporary === false, r.body);
+  r = await http('POST', '/api/student/login', { body: { roll: '2503840100099', password: 'latapass1' } });
+  ok('the same password works with the real roll', r.status === 200, r.body);
+  r = await http('POST', '/api/students/bulk', { token: T(rohit), body: { batch: DA._id, rows: [{ name: 'Late One' }, { name: 'Late Two' }, { roll: 'R1', name: 'With Roll' }] } });
+  ok('import: rows without a roll get their own temporary IDs', r.status === 201 && r.body.temporaryIds.length === 2 && r.body.temporaryIds[0].roll !== r.body.temporaryIds[1].roll, r.body);
+  r = await http('GET', `/api/students?batch=${DA._id}`, { token: T(rohit) });
+  ok('roster marks them temporary', r.body.students.filter(s => s.rollTemporary).length === 2);
 
   server.close(); await mongoose.disconnect(); if (mongod) await mongod.stop();
   console.log(`\n${pass} passed, ${fail} failed`);

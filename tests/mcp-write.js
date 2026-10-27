@@ -86,7 +86,7 @@ async function previewAndConfirm(c, name, args) {
   console.log('\n1. Tool list');
   const { tools } = await cS.listTools();
   const W = ['fill_cycle_report', 'update_cycle_marks', 'set_cycle_top3', 'save_daily_log', 'save_cycle_plan_class'];
-  ok('trainer sees 36 tools', tools.length === 36, tools.length);
+  ok('trainer sees 37 tools', tools.length === 37, tools.length);
   ok('write tools are NOT marked read-only', W.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === false));
   const READ = ['whoami','search','list_batches','get_batch_roster','list_cycles','get_cycle_marks','get_cycle_plan','get_daily_logs','get_student_profile','get_today_overview','get_hall_of_fame'];
   ok('read tools still read-only', READ.every(n => tools.find(t => t.name === n)?.annotations?.readOnlyHint === true));
