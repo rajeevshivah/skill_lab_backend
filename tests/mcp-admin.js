@@ -49,7 +49,7 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   const app = express(); app.use(express.json({ limit: '10mb' })); app.use(require('../middleware/org').resolveOrg);
   for (const [p, r] of [['auth', 'auth'], ['semesters', 'semesters'], ['batches', 'batches'], ['students', 'students'], ['plans', 'plans'],
     ['logs', 'logs'], ['cycles', 'cycles'], ['marks', 'cyclemarks'], ['cycleplans', 'cycleplans'], ['tokens', 'tokens'], ['performance', 'performance'],
-    ['settings', 'settings'], ['meeting', 'meeting'], ['feedback', 'feedback'], ['student-admin', 'studentAdmin']])
+    ['settings', 'settings'], ['meeting', 'meeting'], ['feedback', 'feedback'], ['student-admin', 'studentAdmin'], ['people', 'people'], ['academics', 'academics']])
     app.use(`/api/${p}`, require(`../routes/${r}`));
   app.use('/mcp', require('../mcp'));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
@@ -75,7 +75,7 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   console.log('\n1. Who sees which tools');
   const aNames = (await cA.listTools()).tools.map(t => t.name);
   const tNames = (await cT.listTools()).tools.map(t => t.name);
-  ok('superadmin sees 64 tools', aNames.length === 64, aNames.length);
+  ok('superadmin sees 73 tools', aNames.length === 73, aNames.length);
   ok('trainer sees 38 tools (no admin ones)', tNames.length === 38, tNames.length);
   ok('trainer does NOT see create_user / update_batch / plan_cycles / add_holiday', !['create_user', 'update_batch', 'plan_cycles', 'add_holiday', 'list_users', 'create_cycles'].some(n => tNames.includes(n)));
   ok('create_cycles is gone (plan_cycles replaces it)', !aNames.includes('create_cycles') && aNames.includes('plan_cycles'));
@@ -309,6 +309,31 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
     const all = await call(cA, 'sign_out_everywhere', { all_staff: true });
     ok('all staff: preview counts everyone but me', all.data?.changes?.staff >= 2 && all.data?.changes?.you === 'stay signed in', all.text?.slice(0, 200));
     ok('the AI connection still works after a sign-out', !(await call(cA, 'whoami')).isError);
+  }
+
+  console.log('\n10. People + academic structure');
+  {
+    ok('trainer does not see the people tools', !['link_people', 'list_people', 'get_person', 'update_person', 'get_academic_structure', 'save_programme', 'save_cohort', 'list_profile_fields', 'save_profile_field'].some(n => tNames.includes(n)));
+    await Student.updateOne({ name: 'Aman' }, { $set: { course: 'B.Tech', sem: '3rd', section: 'A' } });
+    const before = await Student.countDocuments({ person: null });
+    const l = await yes(cA, 'link_people', {});
+    ok('link_people preview saves nothing and shows the plan', l.preview.data?.mode === 'preview' && l.preview.data.changes.newPeople >= 1 && l.preview.data.changes.newProgrammes.some(p => p.code === 'BTECH'), l.preview.text?.slice(0, 300));
+    ok('link_people confirm links every record', l.saved.data?.saved && before > 0 && await Student.countDocuments({ person: null }) === 0, l.saved.text?.slice(0, 300));
+    const lp = await call(cA, 'list_people', { q: 'Aman' });
+    const aman = lp.data?.people?.[0];
+    ok('list_people finds the person with programme', aman && aman.programme?.name === 'B.Tech', lp.text?.slice(0, 300));
+    const st = await call(cA, 'get_academic_structure');
+    const btech = st.data?.programmes?.find(p => p.code === 'BTECH');
+    ok('get_academic_structure', !!btech && st.data.cohorts.length >= 1, st.text?.slice(0, 200));
+    const sp = await yes(cA, 'save_programme', { programme_id: String(btech._id), branches: [{ code: 'CSE', name: 'Computer Science' }] });
+    ok('save_programme adds a branch', sp.saved.data?.saved && sp.saved.data.programme.branches[0].code === 'CSE', sp.saved.text?.slice(0, 200));
+    const f = await yes(cA, 'save_profile_field', { key: 'cgpa', label: 'CGPA', type: 'number', min: 0, max: 10 });
+    ok('save_profile_field', f.saved.data?.saved && f.saved.data.field.key === 'cgpa', f.saved.text?.slice(0, 200));
+    const u = await yes(cA, 'update_person', { person_id: String(aman._id), branch: 'CSE', custom: { cgpa: 8.1 }, ids: [{ type: 'apaar', value: '1234' }] });
+    const gp = await call(cA, 'get_person', { person_id: String(aman._id) });
+    ok('update_person + get_person', u.saved.data?.saved && gp.data?.person?.branch === 'CSE' && gp.data.person.custom.cgpa === 8.1 && gp.data.places.length === 1, gp.text?.slice(0, 300));
+    ok('update_person refuses a bad value', (await yes(cA, 'update_person', { person_id: String(aman._id), custom: { cgpa: 11 } })).saved.isError);
+    ok('a trainer cannot call them', (await call(cT, 'list_people', {})).isError);
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

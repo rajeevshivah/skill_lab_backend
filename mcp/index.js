@@ -22,8 +22,9 @@ const { tools: readTools, ToolError } = require('./tools');
 const { writeTools } = require('./writeTools');
 const { adminTools } = require('./adminTools');
 const { opsTools }   = require('./opsTools');
+const { coreTools }  = require('./coreTools');
 const jwt = require('jsonwebtoken');
-const tools = [...readTools, ...writeTools, ...adminTools, ...opsTools];
+const tools = [...readTools, ...writeTools, ...adminTools, ...opsTools, ...coreTools];
 
 // Lets a tool call an EXISTING website route inside this server, as the
 // current user — so admin tools reuse every website rule unchanged.
@@ -51,7 +52,10 @@ const instructions = (org) =>
   `This is ${org.name}'s ${org.programName || 'Skill Lab'} on Pramakra, the class-to-proof training platform` +
   `${org.hosts?.length ? ` (${org.hosts.find(h => h.includes('.')) || org.hosts[0]})` : ''}. ` +
   'You only ever see and change this college\'s data. ' +
-  'Data model: Semester → Batch (a training group, e.g. MERN track or BTech 3rd Sem) → Cycle (2–3 week block ending in ' +
+  'Core (shared by every module): a Person is one real student (programme, cohort = programme + admission year, section, status, ' +
+  'extra profile fields); a training "student" record is that person\'s place in ONE batch (list_people, get_person, link_people, ' +
+  'get_academic_structure). ' +
+  'Training data model: Semester → Batch (a training group, e.g. MERN track or BTech 3rd Sem) → Cycle (2–3 week block ending in ' +
   'a project + assessment) → per-student marks; batches also have daily class logs with roll-wise attendance and a syllabus plan. ' +
   'You act as the signed-in user: superadmin (college admin) and viewer (management, read-only) see all batches, trainers only their own. ' +
   'Use search or list_batches/list_cycles to find ids before calling detail tools. ' +
@@ -59,7 +63,7 @@ const instructions = (org) =>
   'WRITE tools (fill_cycle_report, update_cycle_marks, set_assessment_held, set_cycle_top3, save_daily_log, save_cycle_plan_class and the admin tools) never save on ' +
   'the first call: they return a preview. Always show that preview to the user in plain words and wait for an explicit "yes" ' +
   'before calling again with confirm=true and the preview_token. If the user changes anything, make a new preview. ' +
-  'There are no delete tools. To "remove" something use the reversible tools: update_user active=false (deactivate a login), ' +
+  'The only delete is remove_student (a wrong training record). Otherwise "remove" means the reversible tools: update_user active=false (deactivate a login), ' +
   'update_batch remove_trainers / active=false, update_semester status=archived. ' +
   'Admin tools (users, semesters, batches, cycles, moving students) appear only for superadmin. ' +
   'Cycles are created ONLY with plan_cycles (groups of batches, dates, project days, holidays → dated empty plan rows). ' +

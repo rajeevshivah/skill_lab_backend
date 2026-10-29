@@ -46,6 +46,9 @@ const fameOnly = (req, res, next) => /^\/(halloffame|[a-f0-9]{24}\/photo)/.test(
 app.use('/api/org',       require('./routes/org'));            // which college this address opens (public)
 app.use('/api/platform',  require('./routes/platform'));       // owner console (platform owner only)
 app.use('/api/auth',      require('./routes/auth'));
+// core — the college's people and academic structure, shared by every module
+app.use('/api/people',    require('./routes/people'));
+app.use('/api/academics', require('./routes/academics'));
 app.use('/api/semesters', training, require('./routes/semesters'));
 app.use('/api/batches',   training, require('./routes/batches'));
 app.use('/api/students',  training, require('./routes/students'));

@@ -15,6 +15,9 @@ const studentSchema = new mongoose.Schema({
   // Which batch they train in THIS semester
   batch:    { type: mongoose.Schema.Types.ObjectId, ref: 'Batch', required: true },
   semester: { type: mongoose.Schema.Types.ObjectId, ref: 'Semester', required: true },
+  // The real student this record belongs to (models/Person.js) — this record is
+  // their place in ONE batch. Filled by services/people.js (link).
+  person:   { type: mongoose.Schema.Types.ObjectId, ref: 'Person', default: null },
   // Cumulative performance signals (auto-updated) — powers the Placement Track
   stats: {
     topperCount:   { type: Number, default: 0 },  // times finished top-3
@@ -52,6 +55,7 @@ const studentSchema = new mongoose.Schema({
 
 studentSchema.index({ batch: 1, roll: 1 });
 studentSchema.index({ semester: 1 });
+studentSchema.index({ person: 1 });
 
 studentSchema.virtual('attendancePct').get(function () {
   if (!this.stats.totalSessions) return 0;
