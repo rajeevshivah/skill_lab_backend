@@ -28,6 +28,9 @@ const http = async (method, path, { token, body } = {}) => {
   const app = express(); app.use(express.json()); app.use(require('../middleware/org').resolveOrg);
   app.use('/api/people', require('../routes/people'));
   app.use('/api/academics', require('../routes/academics'));
+  app.use('/api/students', require('../routes/students'));
+  app.use('/api/settings', require('../routes/settings'));
+  app.use('/api/semesters', require('../routes/semesters'));
   const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
   base = `http://127.0.0.1:${server.address().port}`;
   const T = (u) => jwt.sign({ id: u._id }, process.env.JWT_SECRET);
@@ -143,7 +146,7 @@ const http = async (method, path, { token, body } = {}) => {
   await M('Student').updateOne({ _id: ravi1._id }, { $set: { name: 'Ravi Kumar Singh', section: 'A' } });  // then a trainer fixes the name
   const stranger = await add(BD, 'Someone Else', '12425407017', { course: 'B.Tech', sem: '3' });           // roll of Priya, other name
   r = await http('POST', '/api/people/link', { token: T(admin), body: {} });
-  ok('edited name / section → person refreshed', r.body.updatedPeople >= 1 && r.body.newPeople === 0, r.body);
+  ok('edited name → person refreshed', r.body.updatedPeople >= 1 && r.body.newPeople === 0, r.body);
   ok('new record with a known roll + name → joins the person', r.body.recordsToLink === 1);
   ok('known roll + other name → doubtful, never a 2nd person', r.body.doubtful.some(d => d.roll === '12425407017' && /priya/i.test(d.reason)), r.body.doubtful);
   r = await http('POST', '/api/people/link', { token: T(admin), body: { apply: true } });
@@ -236,6 +239,88 @@ const http = async (method, path, { token, body } = {}) => {
   ok('student may not fill a staff-only field', people.checkCustom([{ key: 'passport', label: 'P', type: 'boolean', editableBy: 'staff' }], { passport: true }, { asStudent: true }).errors.length === 1);
   r = await http('GET', `/api/people/${priya._id}`, { token: T(md) });
   ok('fields come with the person', r.body.fields.length === 3 && r.body.person.custom.tenth_percent === 86.4);
+
+  console.log('\n— Adding a student (trainer, one at a time)');
+  const S = (tok, body) => http('POST', '/api/students', { token: tok, body });
+  r = await S(T(rohit), { batch: DA._id, name: 'Neha Gupta', roll: '12425407500', course: 'BCA', sem: '5th', section: 'B' });
+  const neha = r.body.student;
+  ok('new roll → added and a new person made', r.status === 201 && neha.person && await M('Person').exists({ _id: neha.person, roll: '12425407500', name: 'Neha Gupta' }), r.body);
+  const nehaP = await M('Person').findById(neha.person).populate('academic.cohort').lean();
+  ok('…placed in programme / cohort / section', nehaP.academic.cohort?.name === 'BCA 2024–27' && nehaP.academic.section === 'B' && nehaP.academic.semesterNo === 5, nehaP.academic);
+  r = await S(T(rohit), { batch: BD._id, name: 'NEHA  gupta', roll: '12425407500', course: 'BCA' });
+  ok('same roll + name in another batch → same person, with a warning', r.status === 201 && String(r.body.student.person) === String(neha.person) && /Data Analyst/.test(r.body.warning || ''), r.body);
+  const peopleBefore = await M('Person').countDocuments({});
+  r = await S(T(rohit), { batch: DA._id, name: 'Rakesh Verma', roll: '124258090100' });
+  ok('a roll that belongs to someone else (other name) → refused, nothing made', r.status === 409 && /Sahil/i.test(r.body.message) && await M('Person').countDocuments({}) === peopleBefore && !(await M('Student').exists({ name: 'Rakesh Verma' })), r.body);
+  r = await S(T(rohit), { batch: DA._id, name: 'S. Prajapati', roll: '124258090100', samePerson: true });
+  ok('a trainer cannot force "same student"', r.status === 409);
+  const sahilP = (await M('Student').findById(sahil._id)).person;
+  r = await S(T(admin), { batch: B3A._id, name: 'S. Prajapati', roll: '124258090100', samePerson: true });
+  ok('admin can say it IS that student', r.status === 201 && String(r.body.student.person) === String(sahilP), r.body);
+  r = await S(T(rohit), { batch: DA._id, name: 'No Roll Yet' });
+  ok('no roll → temporary ID, own person', r.status === 201 && r.body.student.rollTemporary && (await M('Person').findById(r.body.student.person)).rollTemporary === true);
+
+  console.log('\n— Importing a list');
+  const rowsIn = [
+    { name: 'Fresh One', roll: '12425407601', course: 'BCA', sem: '5', section: 'A' },
+    { name: 'Neha Gupta', roll: '12425407500' },                    // known, same name → joins
+    { name: 'Wrong Name', roll: '124258090300' },                   // Ravi's roll → refused
+    { name: 'No Roll', roll: '' },
+  ];
+  r = await http('POST', '/api/students/bulk?preview=1', { token: T(admin), body: { batch: B3A._id, rows: rowsIn } });
+  ok('preview: the refused row is reported, nothing saved', r.status === 200 && r.body.willImport === 3 && r.body.skipped.some(x => x.roll === '124258090300' && /Ravi/i.test(x.reason)) && !(await M('Student').exists({ name: 'Fresh One' })), r.body);
+  r = await http('POST', '/api/students/bulk', { token: T(admin), body: { batch: B3A._id, rows: rowsIn } });
+  const fresh = await M('Student').findOne({ name: 'Fresh One' }).lean(), nehaB3 = await M('Student').findOne({ batch: B3A._id, roll: '12425407500' }).lean();
+  ok('import: new rows linked, known row joins the same person', r.status === 201 && r.body.imported === 3 && fresh.person && String(nehaB3.person) === String(neha.person)
+    && !(await M('Student').exists({ name: 'Wrong Name' })) && !(await M('Student').exists({ batch: B3A._id, person: null })), r.body);
+
+  console.log('\n— Editing a name / roll');
+  const E = (id, body, tok = T(rohit)) => http('PUT', `/api/students/${id}`, { token: tok, body });
+  r = await E(neha._id, { name: 'Neha Kumari Gupta' });
+  ok('name edit → person + the other batch places', r.status === 200 && (await M('Person').findById(neha.person)).name === 'Neha Kumari Gupta'
+    && (await M('Student').find({ person: neha.person })).every(x => x.name === 'Neha Kumari Gupta'), (await M('Student').find({ person: neha.person }).lean()).map(x => x.name));
+  r = await E(neha._id, { roll: '124258090100' });
+  ok('roll edit to someone else\'s roll → refused', r.status === 409 && /Sahil/i.test(r.body.message), r.body);
+  r = await E(neha._id, { roll: '12425407555' });
+  ok('roll edit → person + other places get the new roll', r.status === 200 && (await M('Person').findById(neha.person)).roll === '12425407555'
+    && (await M('Student').find({ person: neha.person })).every(x => x.roll === '12425407555'), r.body);
+
+  console.log('\n— Only the admin adds new students (college setting)');
+  ok('trainer cannot change the setting', (await http('PUT', '/api/settings/student-creation', { token: T(rohit), body: { mode: 'admin' } })).status === 403);
+  r = await http('PUT', '/api/settings/student-creation', { token: T(admin), body: { mode: 'admin' } });
+  ok('admin sets it', r.status === 200 && r.body.mode === 'admin');
+  r = await S(T(rohit), { batch: DA._id, name: 'Brand New', roll: '12425407999' });
+  ok('trainer: a new roll is refused', r.status === 409 && /only the admin/.test(r.body.message), r.body);
+  r = await S(T(rohit), { batch: DA._id, name: 'Fresh One', roll: '12425407601' });
+  ok('trainer: a student already in the list can be added', r.status === 201 && String(r.body.student.person) === String(fresh.person), r.body);
+  r = await http('POST', '/api/students/bulk', { token: T(rohit), body: { batch: DA._id, rows: [{ name: 'Brand New 2', roll: '12425407998' }] } });
+  ok('trainer import: new rows skipped with the reason', r.status === 201 && r.body.imported === 0 && /only the admin/.test(r.body.skipped[0]?.reason), r.body);
+  r = await S(T(admin), { batch: DA._id, name: 'Brand New', roll: '12425407999' });
+  ok('admin can still add new students', r.status === 201 && r.body.student.person);
+  await http('PUT', '/api/settings/student-creation', { token: T(admin), body: { mode: 'trainers' } });
+
+  console.log('\n— Removing and merging');
+  const lone = (await S(T(rohit), { batch: DA._id, name: 'Typo Student', roll: '12425407777' })).body.student;
+  r = await http('DELETE', `/api/students/${lone._id}`, { token: T(rohit) });
+  ok('removing the only place of a student made by mistake removes the person too', r.status === 200 && !(await M('Person').exists({ _id: lone.person })), r.body);
+  const nehaDA = await M('Student').findOne({ batch: DA._id, person: neha.person });
+  r = await http('DELETE', `/api/students/${nehaDA._id}`, { token: T(rohit) });
+  ok('removing one of two places keeps the person', r.status === 200 && await M('Person').exists({ _id: neha.person }));
+  const keepRec = (await S(T(admin), { batch: B3A._id, name: 'Twin Entry', roll: '12425407880' })).body.student;
+  const dupRec = await M('Student').create({ name: 'Twin Entri', roll: '12425407881', batch: B3A._id, semester: sem._id });
+  await http('PUT', `/api/students/${dupRec._id}`, { token: T(admin), body: { name: 'Twin Entri' } });   // gets its own person
+  const dupPerson = (await M('Student').findById(dupRec._id)).person;
+  r = await http('POST', `/api/students/${dupRec._id}/merge`, { token: T(admin), body: { into: keepRec._id } });
+  ok('merging a duplicate removes its extra person', r.status === 200 && dupPerson && !(await M('Person').exists({ _id: dupPerson })) && await M('Person').exists({ _id: keepRec.person }), r.body);
+
+  console.log('\n— New semester → everyone moves up');
+  ok('semester number from cohort + term', people.semesterNow(2025, '2027-01-10', { termsPerYear: 2, durationYears: 3 }) === 4 && people.semesterNow(2024, '2027-07-15', { durationYears: 3 }) === null && people.semesterNow(2023, '2026-07-20', {}) === 7);
+  await M('Person').updateOne({ _id: ravi._id }, { $set: { status: 'left' } });
+  r = await http('POST', '/api/semesters', { token: T(admin), body: { name: 'Even 2026-27', startDate: '2027-01-11' } });
+  const bcaNow = await M('Person').find({ 'academic.cohort': bca._id, status: 'studying' }).lean();
+  ok('BCA 2025 cohort is now in 4th sem', r.status === 201 && bcaNow.length > 3 && bcaNow.every(p => p.academic.semesterNo === 4), bcaNow.map(p => p.academic.semesterNo));
+  ok('a student who left is not moved', (await M('Person').findById(ravi._id)).academic.semesterNo === 3);
+  ok('final-year rule: past the course length → left as it was', people.semesterNow(2021, '2027-01-11', { durationYears: 3 }) === null);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   if (fail) console.log('FAILED:', fails.join(' | '));

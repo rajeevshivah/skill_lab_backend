@@ -123,4 +123,19 @@ router.put('/student-signup', protect, superadminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// GET/PUT /api/settings/student-creation { mode: 'trainers' | 'admin' }
+router.get('/student-creation', protect, async (req, res) => {
+  try { res.json({ mode: await require('../services/people').creationMode() }); }
+  catch (err) { res.status(500).json({ message: err.message }); }
+});
+router.put('/student-creation', protect, superadminOnly, async (req, res) => {
+  try {
+    const mode = req.body?.mode;
+    if (!['trainers', 'admin'].includes(mode)) return res.status(400).json({ message: 'mode must be trainers or admin' });
+    await Organization.updateOne({ _id: tenant.currentOrg() }, { $set: { 'settings.studentCreation': mode } });
+    require('../middleware/org').forget();
+    res.json({ mode });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
 module.exports = router;

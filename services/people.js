@@ -155,34 +155,18 @@ function checkCustom(fields, input, { asStudent = false } = {}) {
 }
 
 class LinkError extends Error {}
+class PeopleError extends Error { constructor(msg, status = 400, extra = {}) { super(msg); this.status = status; Object.assign(this, extra); } }
 
-// ── link ─────────────────────────────────────────────────────────────
-
-/**
- * @param {object} opts
- *   apply   — false: plan only (nothing saved)
- *   merge   — [[studentId, …], …] records the admin says ARE one person
- *             (resolves "doubtful" groups: same roll, different spelling)
- *   userId  — who is doing it
- */
-async function link({ apply = false, merge = [], userId = null } = {}) {
-  const [students, batches, semesters, programmes, cohorts, persons] = await Promise.all([
-    Student.find({}).select('name roll rollTemporary course sem section batch semester person demo github updatedAt').setOptions({ withDemo: true }).lean(),
-    Batch.find({}).select('name').lean(),
-    Semester.find({}).select('startDate').lean(),
-    Programme.find({}).lean(),
-    Cohort.find({}).lean(),
-    Person.find({}).lean(),
-  ]);
-  const batchName = new Map(batches.map(b => [String(b._id), b.name]));
-  const semStart  = new Map(semesters.map(s => [String(s._id), s.startDate]));
-  const personById = new Map(persons.map(p => [String(p._id), p]));
-  const ref = (s) => ({ studentId: String(s._id), name: s.name, roll: s.roll, batch: batchName.get(String(s.batch)) || '?' });
-
-  // programmes by code / alias, made on demand (plan: in memory only)
+// ── the academic structure, loaded once, grown on demand ─────────────
+// programmeFor("B.Tech CSE") / cohortFor(…) return existing or NEW (unsaved)
+// entries; save() writes the new ones. Used by link() and by adding students.
+async function loadStructure() {
+  const [programmes, cohorts, semesters] = await Promise.all([Programme.find({}).lean(), Cohort.find({}).lean(), Semester.find({}).select('startDate status').lean()]);
+  const semStart = new Map(semesters.map(x => [String(x._id), x.startDate]));
   const progByCode = new Map();
   for (const p of programmes) { progByCode.set(p.code, p); for (const a of p.aliases || []) if (!progByCode.has(a)) progByCode.set(a, p); }
-  const newProgrammes = [], newBranches = [];
+  const progById = new Map(programmes.map(p => [String(p._id), p]));
+  const newProgrammes = [], newBranches = [], newCohorts = [];
   const programmeFor = (course) => {
     const c = parseCourse(course);
     if (!c) return null;
@@ -199,21 +183,98 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
     }
     return { prog: p, branch: c.branch };
   };
-  // cohorts by programme + branch + year
   const cohortKey = (progCode, branch, year) => `${progCode}|${branch}|${year}`;
-  const progCodeById = new Map(programmes.map(p => [String(p._id), p.code]));
-  const cohortBy = new Map(cohorts.map(c => [cohortKey(progCodeById.get(String(c.programme)), c.branch || '', c.admissionYear), c]));
-  const newCohorts = [];
+  const cohortBy = new Map(cohorts.map(c => [cohortKey(progById.get(String(c.programme))?.code, c.branch || '', c.admissionYear), c]));
   const cohortFor = (prog, branch, year, section) => {
     if (!prog || !year) return null;
     const k = cohortKey(prog.code, branch, year);
     let c = cohortBy.get(k);
     if (!c) { c = { _id: null, prog, branch, admissionYear: year, name: cohortName(prog, branch, year), sections: [], _new: true }; cohortBy.set(k, c); newCohorts.push(c); }
-    if (section && !c.sections.some(s => s.code === section)) { c.sections.push({ code: section, isActive: true }); c._sectionsChanged = true; }
+    if (section && !c.sections.some(x => x.code === section)) { c.sections = [...c.sections, { code: section, isActive: true }]; c._sectionsChanged = true; }
     return c;
   };
+  // where a training record puts a NEW person: programme, branch, cohort, section, semester
+  const placeOf = (rec) => {
+    const pl = programmeFor(rec.course);
+    const prog = pl?.prog || null, branch = pl?.branch || '';
+    const semNo = semesterNo(rec.sem), section = sectionCode(rec.section);
+    const cohort = cohortFor(prog, branch, admissionYear(semStart.get(String(rec.semester)), semNo, prog?.termsPerYear || 2), section);
+    return { prog, branch, cohort, section, semNo };
+  };
+  async function save(userId) {
+    for (const p of newProgrammes) {
+      if (p._id) continue;
+      const made = await Programme.create({ code: p.code, name: p.name, level: p.level, durationYears: p.durationYears, branches: p.branches, createdBy: userId });
+      p._id = made._id; p._branchesChanged = false;
+    }
+    for (const p of new Set(progByCode.values())) if (p._id && p._branchesChanged) { await Programme.updateOne({ _id: p._id }, { $set: { branches: p.branches } }); p._branchesChanged = false; }
+    for (const c of cohortBy.values()) {
+      if (!c._id) {
+        const made = await Cohort.create({ programme: c.prog._id, branch: c.branch, admissionYear: c.admissionYear, name: c.name, sections: c.sections, createdBy: userId });
+        c._id = made._id; c._sectionsChanged = false;
+      } else if (c._sectionsChanged) { await Cohort.updateOne({ _id: c._id }, { $set: { sections: c.sections } }); c._sectionsChanged = false; }
+    }
+  }
+  return { semStart, placeOf, save, newProgrammes, newBranches, newCohorts };
+}
 
-  // ── group the records into people ──
+// A new person's fields from a training record and its place.
+const personDoc = (rec, place, userId, source = 'training') => ({
+  name: rec.name, roll: rec.roll || '', rollTemporary: !!(rec.rollTemporary || tempRoll.isTemp(rec.roll)), demo: !!rec.demo, source,
+  academic: { programme: place.prog?._id || null, branch: place.branch, cohort: place.cohort?._id || null, section: place.section, semesterNo: place.semNo },
+  links: { github: rec.github || '' }, createdBy: userId,
+});
+
+// ── semester number from the cohort + the running term ───────────────
+// odd term (June–December) of 2026-27 for a 2025 cohort → 3rd sem. Two-term programmes only.
+function semesterNow(admission, termStart, prog) {
+  if (!admission || !termStart || (prog?.termsPerYear || 2) !== 2) return null;
+  const d = new Date(termStart);
+  const odd = d.getUTCMonth() >= 5;
+  const academicYear = odd ? d.getUTCFullYear() : d.getUTCFullYear() - 1;
+  const n = (academicYear - admission) * 2 + (odd ? 1 : 2);
+  const max = Math.round((prog?.durationYears || 4) * 2);
+  return n >= 1 && n <= max ? n : null;
+}
+// Set every studying person's semester number from their cohort and the active term.
+async function recomputeSemesters() {
+  const term = await Semester.findOne({ status: 'active' }).sort('-startDate').select('startDate').lean();
+  if (!term?.startDate) return { updated: 0 };
+  const [cohorts, programmes] = await Promise.all([Cohort.find({}).select('programme admissionYear').lean(), Programme.find({}).select('termsPerYear durationYears').lean()]);
+  const prog = new Map(programmes.map(p => [String(p._id), p]));
+  const ops = [];
+  for (const c of cohorts) {
+    const n = semesterNow(c.admissionYear, term.startDate, prog.get(String(c.programme)));
+    if (n) ops.push({ updateMany: { filter: { 'academic.cohort': c._id, status: 'studying', 'academic.semesterNo': { $ne: n } }, update: { $set: { 'academic.semesterNo': n } } } });
+  }
+  if (!ops.length) return { updated: 0 };
+  const r = await Person.bulkWrite(ops);
+  return { updated: r.modifiedCount || 0 };
+}
+
+// ── link: training records → people ──────────────────────────────────
+
+/**
+ * @param {object} opts
+ *   apply   — false: plan only (nothing saved)
+ *   merge   — [[studentId, …], …] records the admin says ARE one person
+ *             (resolves "doubtful" groups: same roll, different spelling)
+ *   userId  — who is doing it
+ * Already-linked people get their name / roll / demo copied from the newest
+ * record; where they are (programme, cohort, section) is set only when empty —
+ * after that it is managed on the person (admin, import), not by training text.
+ */
+async function link({ apply = false, merge = [], userId = null } = {}) {
+  const [students, batches, persons, S] = await Promise.all([
+    Student.find({}).select('name roll rollTemporary course sem section batch semester person demo github updatedAt').setOptions({ withDemo: true }).lean(),
+    Batch.find({}).select('name').lean(),
+    Person.find({}).lean(),
+    loadStructure(),
+  ]);
+  const batchName = new Map(batches.map(b => [String(b._id), b.name]));
+  const personById = new Map(persons.map(p => [String(p._id), p]));
+  const ref = (s) => ({ studentId: String(s._id), name: s.name, roll: s.roll, batch: batchName.get(String(s.batch)) || '?' });
+
   // forced merges first (admin's decision)
   const forced = new Map();   // studentId → group no.
   const byId = new Map(students.map(s => [String(s._id), s]));
@@ -229,7 +290,7 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
   for (const s of students) {
     let key;
     if (forced.has(String(s._id))) key = `merge:${forced.get(String(s._id))}`;
-    else if (s.person) key = `person:${s.person}`;                         // already linked
+    else if (s.person && personById.has(String(s.person))) key = `person:${s.person}`;   // already linked
     else if (s.roll && !s.rollTemporary && !tempRoll.isTemp(s.roll)) key = `roll:${normRoll(s.roll)}`;
     else key = `one:${s._id}`;                                            // no real roll: on their own
     (groups.get(key) || groups.set(key, []).get(key)).push(s);
@@ -257,31 +318,22 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
       doubtful.push({ roll: recs[0].roll, reason: 'Same roll number, different names', records: recs.map(ref) });
       continue;
     }
-    // the person's details come from the newest record (active semester first)
-    const latest = [...recs].sort((a, b) => (semStart.get(String(b.semester)) || 0) - (semStart.get(String(a.semester)) || 0)
+    // copies come from the newest record (active semester first)
+    const latest = [...recs].sort((a, b) => (S.semStart.get(String(b.semester)) || 0) - (S.semStart.get(String(a.semester)) || 0)
       || new Date(b.updatedAt) - new Date(a.updatedAt))[0];
-    const place = programmeFor(latest.course);
-    const prog = place?.prog || null, branch = place?.branch || '';
-    const semNo = semesterNo(latest.sem);
-    const section = sectionCode(latest.section);
-    const cohort = cohortFor(prog, branch, admissionYear(semStart.get(String(latest.semester)), semNo, prog?.termsPerYear || 2), section);
     const existing = key.startsWith('person:') ? personById.get(key.slice(7)) : null;
+    const place = !existing || !existing.academic?.programme ? S.placeOf(latest) : null;
     plans.push({
-      existing, recs, prog, cohort,
-      doc: {
-        name: latest.name, roll: latest.roll || '', rollTemporary: !!(latest.rollTemporary || tempRoll.isTemp(latest.roll)),
-        demo: recs.every(r => r.demo),
-        github: recs.map(r => r.github).find(Boolean) || '',
-        semesterNo: semNo, section, branch,
-      },
+      existing, recs, latest, place,
+      doc: { name: latest.name, roll: latest.roll || '', rollTemporary: !!(latest.rollTemporary || tempRoll.isTemp(latest.roll)),
+        demo: recs.every(r => r.demo), github: recs.map(r => r.github).find(Boolean) || '' },
     });
   }
 
   // possible same person made separately: same name, and one roll temporary or a character added/dropped
   const possibleSame = [];
-  const loose = plans.filter(p => !p.doc.demo);
   const byName = new Map();
-  for (const p of loose) { const k = normName(p.doc.name); (byName.get(k) || byName.set(k, []).get(k)).push(p); }
+  for (const p of plans.filter(x => !x.doc.demo)) { const k = normName(p.doc.name); (byName.get(k) || byName.set(k, []).get(k)).push(p); }
   for (const list of byName.values()) {
     for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
       const a = list[i].doc, b = list[j].doc;
@@ -291,12 +343,17 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
     }
   }
 
-  const changedPerson = (p) => {
-    const e = p.existing; if (!e) return true;
-    return e.name !== p.doc.name || (e.roll || '') !== p.doc.roll || !!e.rollTemporary !== p.doc.rollTemporary
-      || String(e.academic?.programme || '') !== String(p.prog?._id || '') || String(e.academic?.cohort || '') !== String(p.cohort?._id || '')
-      || (e.academic?.section || '') !== p.doc.section || (e.academic?.branch || '') !== p.doc.branch || (e.academic?.semesterNo ?? null) !== p.doc.semesterNo
-      || (!e.links?.github && !!p.doc.github);
+  const changes = (p) => {
+    const e = p.existing, set = {};
+    if (!e) return set;
+    if (e.name !== p.doc.name) set.name = p.doc.name;
+    if ((e.roll || '') !== p.doc.roll) set.roll = p.doc.roll;
+    if (!!e.rollTemporary !== p.doc.rollTemporary) set.rollTemporary = p.doc.rollTemporary;
+    if (!!e.demo !== p.doc.demo) set.demo = p.doc.demo;
+    if (!e.links?.github && p.doc.github) set['links.github'] = p.doc.github;
+    if (p.place?.prog) Object.assign(set, { 'academic.programme': p.place.prog, 'academic.branch': p.place.branch, 'academic.cohort': p.place.cohort,
+      'academic.section': p.place.section, 'academic.semesterNo': p.place.semNo });
+    return set;
   };
   const unlinkedRecs = (p) => p.recs.filter(r => !p.existing || String(r.person || '') !== String(p.existing._id));
 
@@ -304,57 +361,133 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
     trainingRecords: students.length,
     people: plans.length,
     newPeople: plans.filter(p => !p.existing).length,
-    updatedPeople: plans.filter(p => p.existing && changedPerson(p)).length,
+    updatedPeople: plans.filter(p => p.existing && Object.keys(changes(p)).length).length,
     recordsToLink: plans.reduce((n, p) => n + unlinkedRecs(p).length, 0),
     inSeveralBatches: plans.filter(p => p.recs.length > 1).map(p => ({ name: p.doc.name, roll: p.doc.roll, batches: p.recs.map(r => batchName.get(String(r.batch)) || '?') })),
-    newProgrammes: newProgrammes.map(p => ({ code: p.code, name: p.name, level: p.level, durationYears: p.durationYears })),
-    newBranches,
-    newCohorts: newCohorts.map(c => c.name),
+    newProgrammes: S.newProgrammes.map(p => ({ code: p.code, name: p.name, level: p.level, durationYears: p.durationYears })),
+    newBranches: S.newBranches,
+    newCohorts: S.newCohorts.map(c => c.name),
     doubtful,
     possibleSame,
-    withoutProgramme: plans.filter(p => !p.prog && !p.doc.demo).map(p => ref(p.recs[0])),
+    withoutProgramme: plans.filter(p => !p.doc.demo && !(p.place?.prog || p.existing?.academic?.programme)).map(p => ref(p.recs[0])),
   };
   if (!apply) return { applied: false, ...summary };
 
   // ── apply ──
-  for (const p of newProgrammes) {
-    const made = await Programme.create({ code: p.code, name: p.name, level: p.level, durationYears: p.durationYears, branches: p.branches, createdBy: userId });
-    p._id = made._id;
-  }
-  for (const p of new Set(progByCode.values())) if (!p._new && p._branchesChanged) await Programme.updateOne({ _id: p._id }, { $set: { branches: p.branches } });
-  for (const c of cohortBy.values()) {
-    if (c._new) {
-      const made = await Cohort.create({ programme: c.prog._id, branch: c.branch, admissionYear: c.admissionYear, name: c.name, sections: c.sections, createdBy: userId });
-      c._id = made._id;
-    } else if (c._sectionsChanged) {
-      await Cohort.updateOne({ _id: c._id }, { $set: { sections: c.sections } });
-    }
-  }
+  await S.save(userId);
+  const ids = (set) => Object.fromEntries(Object.entries(set).map(([k, v]) => [k, v && typeof v === 'object' && '_id' in v ? v._id : v]));
+  const fresh = plans.filter(p => !p.existing);
+  const made = fresh.length ? await Person.insertMany(fresh.map(p => personDoc({ ...p.latest, ...p.doc }, p.place, userId))) : [];
+  fresh.forEach((p, i) => { p.id = made[i]._id; });
   const personOps = [], studentOps = [];
   for (const p of plans) {
-    const set = {
-      name: p.doc.name, roll: p.doc.roll, rollTemporary: p.doc.rollTemporary,
-      'academic.programme': p.prog?._id || null, 'academic.cohort': p.cohort?._id || null,
-      'academic.section': p.doc.section, 'academic.semesterNo': p.doc.semesterNo, 'academic.branch': p.doc.branch,
-    };
     if (p.existing) {
-      if (!p.existing.links?.github && p.doc.github) set['links.github'] = p.doc.github;
-      if (changedPerson(p)) personOps.push({ updateOne: { filter: { _id: p.existing._id }, update: { $set: { ...set, updatedBy: userId } } } });
       p.id = p.existing._id;
-    } else {
-      const made = await Person.create({
-        name: p.doc.name, roll: p.doc.roll, rollTemporary: p.doc.rollTemporary, demo: p.doc.demo, source: 'training',
-        academic: { programme: p.prog?._id || null, branch: p.doc.branch, cohort: p.cohort?._id || null, section: p.doc.section, semesterNo: p.doc.semesterNo },
-        links: { github: p.doc.github }, createdBy: userId,
-      });
-      p.id = made._id;
+      const set = ids(changes(p));
+      if (Object.keys(set).length) personOps.push({ updateOne: { filter: { _id: p.id }, update: { $set: { ...set, updatedBy: userId } } } });
     }
     for (const r of unlinkedRecs(p)) studentOps.push({ updateOne: { filter: { _id: r._id }, update: { $set: { person: p.id } } } });
   }
   if (personOps.length) await Person.bulkWrite(personOps);
   // (linking is not an edit of the record: its 'last updated' time stays, so the next run picks the same latest record)
   if (studentOps.length) await Student.bulkWrite(studentOps, { timestamps: false });
-  return { applied: true, ...summary, linked: studentOps.length };
+  const sems = await recomputeSemesters();
+  return { applied: true, ...summary, linked: studentOps.length, semestersUpdated: sems.updated };
 }
 
-module.exports = { link, LinkError, parseCourse, checkCustom, sameName, nearRoll, normName, courseCode, semesterNo, sectionCode, admissionYear, KNOWN };
+// ── everyday: adding, editing, removing training records ─────────────
+
+const roll1 = (r) => normRoll(r);
+const isReal = (roll, temp) => !!roll && !temp && !tempRoll.isTemp(roll);
+async function placesOf(personId, exceptStudentId) {
+  const rows = await Student.find({ person: personId, ...(exceptStudentId ? { _id: { $ne: exceptStudentId } } : {}) })
+    .select('batch').populate('batch', 'name').setOptions({ withDemo: true }).lean();
+  return rows.map(r => r.batch?.name || '?');
+}
+async function creationMode() {
+  const o = await require('../models/Organization').findById(require('./tenant').currentOrg()).select('settings.studentCreation').lean();
+  return o?.settings?.studentCreation || 'trainers';
+}
+
+/**
+ * Which person each new training record belongs to — BEFORE anything is saved.
+ * rows: [{ name, roll, rollTemporary? }]. For each: { action: 'attach', person } | { action: 'create' } |
+ * { action: 'refuse', reason } (roll belongs to someone with another name; or the college lets only the admin add new students).
+ * samePerson: the admin/trainer confirmed a different spelling IS that student.
+ */
+async function matchRows(rows, user, { samePerson = false } = {}) {
+  const real = [...new Set(rows.filter(r => isReal(r.roll, r.rollTemporary)).map(r => roll1(r.roll)))];
+  const found = real.length ? await Person.find({ roll: { $in: real.map(r => new RegExp(`^\\s*${r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i')) } }).lean() : [];
+  const byRoll = new Map(found.filter(p => !p.rollTemporary).map(p => [roll1(p.roll), p]));
+  const onlyAdmin = (await creationMode()) === 'admin' && user.role !== 'superadmin';
+  const out = [];
+  for (const r of rows) {
+    const p = isReal(r.roll, r.rollTemporary) ? byRoll.get(roll1(r.roll)) : null;
+    if (p) {
+      if (samePerson || sameName(r.name, p.name)) out.push({ action: 'attach', person: p });
+      else {
+        const where = await placesOf(p._id);
+        out.push({ action: 'refuse', person: p, reason: `Roll ${r.roll} already belongs to ${p.name}${where.length ? ` (${where.join(', ')})` : ''} — check the roll, or if it is the same student use the name "${p.name}".` });
+      }
+    } else if (onlyAdmin) out.push({ action: 'refuse', reason: `${r.roll || r.name} is not in the college's student list — only the admin can add new students.` });
+    else out.push({ action: 'create' });
+  }
+  return out;
+}
+
+// After the training records are saved: make the people for 'create' rows and
+// link every record. records[i] ↔ matches[i] (same order as matchRows).
+async function linkNew(records, matches, userId) {
+  const S = await loadStructure();
+  const toCreate = [];
+  records.forEach((rec, i) => { if (matches[i].action === 'create') toCreate.push({ rec, place: S.placeOf(rec), i }); });
+  if (toCreate.length) {
+    await S.save(userId);
+    const made = await Person.insertMany(toCreate.map(x => personDoc(x.rec, x.place, userId)));
+    toCreate.forEach((x, k) => { matches[x.i] = { action: 'attach', person: made[k] }; });
+  }
+  const ops = records.map((rec, i) => matches[i].action === 'attach' && { updateOne: { filter: { _id: rec._id }, update: { $set: { person: matches[i].person._id } } } }).filter(Boolean);
+  if (ops.length) await Student.bulkWrite(ops, { timestamps: false });
+  records.forEach((rec, i) => { if (matches[i].action === 'attach') rec.person = matches[i].person._id; });
+}
+
+/**
+ * Before saving a name / roll edit of a training record: is the new roll free?
+ * Returns null (fine) or a message. A roll that another person holds is refused.
+ */
+async function checkIdentityEdit(record, { roll, rollTemporary }) {
+  if (!isReal(roll, rollTemporary) || roll1(roll) === roll1(record.roll)) return null;
+  const rx = new RegExp(`^\\s*${String(roll).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
+  const other = await Person.findOne({ roll: rx, rollTemporary: { $ne: true }, ...(record.person ? { _id: { $ne: record.person } } : {}) }).lean();
+  if (!other) return null;
+  const where = await placesOf(other._id);
+  return `Roll ${roll} already belongs to ${other.name}${where.length ? ` (${where.join(', ')})` : ''}. If they are the same student, merge the records instead.`;
+}
+
+// After a name / roll / GitHub edit of a training record: the person and the
+// student's other batch places get the same name and roll.
+async function syncIdentity(record, userId) {
+  if (!record.person) {   // not linked yet: link it now (a roll held by someone else with another name stays unlinked)
+    const m = await matchRows([record], { role: 'superadmin' });
+    if (m[0].action !== 'refuse') await linkNew([record], m, userId);
+    return;
+  }
+  const set = { name: record.name, roll: record.roll || '', rollTemporary: !!record.rollTemporary, updatedBy: userId };
+  if (record.github) set['links.github'] = record.github;
+  await Person.updateOne({ _id: record.person }, { $set: set });
+  await Student.updateMany({ person: record.person, _id: { $ne: record._id } }, { $set: { name: record.name, roll: record.roll, rollTemporary: !!record.rollTemporary } }).setOptions({ withDemo: true });
+}
+
+// After a training record is removed: a person left with nothing (no other
+// place, nothing filled in beyond what training copied) goes too.
+async function afterRemove(personId) {
+  if (!personId) return;
+  if (await Student.exists({ person: personId })) return;
+  const p = await Person.findById(personId).lean();
+  if (!p || p.source !== 'training') return;
+  const filled = Object.keys(p.custom || {}).length || p.contact?.email || p.contact?.phone || (p.ids || []).length || p.links?.linkedin || p.links?.portfolio;
+  if (!filled) await Person.deleteOne({ _id: personId });
+}
+
+module.exports = { link, LinkError, PeopleError, matchRows, linkNew, checkIdentityEdit, syncIdentity, afterRemove, recomputeSemesters, semesterNow, creationMode,
+  parseCourse, checkCustom, sameName, nearRoll, normName, courseCode, semesterNo, sectionCode, admissionYear, KNOWN };

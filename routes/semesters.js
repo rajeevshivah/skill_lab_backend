@@ -39,6 +39,7 @@ router.post('/', protect, superadminOnly, async (req, res) => {
       status: 'active',
       createdBy: req.user._id,
     });
+    await require('../services/people').recomputeSemesters().catch(e => console.error('[semesters] recompute:', e.message));   // every student moves up a semester
     res.status(201).json({ semester });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -62,6 +63,7 @@ router.patch('/:id', protect, superadminOnly, async (req, res) => {
       { new: true }
     );
     if (!semester) return res.status(404).json({ message: 'Semester not found' });
+    if (status === 'active') await require('../services/people').recomputeSemesters().catch(e => console.error('[semesters] recompute:', e.message));
     res.json({ semester });
   } catch (err) {
     res.status(500).json({ message: err.message });

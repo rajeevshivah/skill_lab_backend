@@ -25,8 +25,9 @@ admin(writeTool({
     'name = one person (e.g. a student in two tracks). Creates programmes (from the course) and cohorts (programme + admission year) as needed. ' +
     'The preview lists: people to create/update, students in several batches, new programmes/cohorts, DOUBTFUL groups (same roll, ' +
     'different names — left unlinked: fix the roll with edit_student, or pass them in merge_groups if they ARE one person) and ' +
-    '"possible same" pairs (same name, temporary or near-identical roll — made separately, check them). Safe to run again: it refreshes ' +
-    'name/roll/place from the latest record and links new records.',
+    '"possible same" pairs (same name, temporary or near-identical roll — made separately, check them). Safe to run again: it copies ' +
+    'name/roll from the latest record and links any unlinked record; where a person is (programme, cohort, section) is set only when empty, ' +
+    'and semester numbers follow the cohort + the active term. Adding/editing students keeps people in step by itself — run this only to check.',
   input: { merge_groups: z.array(z.array(objId).min(2).max(10)).max(50).optional().describe('Training record ids (student_id) that are ONE person') },
   async plan(a, user, ctx) {
     const body = { merge: a.merge_groups || [] };

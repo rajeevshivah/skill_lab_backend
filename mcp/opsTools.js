@@ -201,6 +201,18 @@ admin(writeTool({
   },
 }));
 
+admin(writeTool({
+  name: 'set_student_creation',
+  title: 'Who can add NEW students to the college list',
+  description: 'trainers (default): a trainer adding a student whose roll is new creates them in the college\'s student list. ' +
+    'admin: trainers can only add students already in the list (added by the admin or an import) — no typos or made-up entries.',
+  input: { mode: z.enum(['trainers', 'admin']) },
+  async plan(a, user, ctx) {
+    return { summary: `New students can be created by: ${a.mode === 'admin' ? 'the admin only (and imports)' : 'trainers too'}`, changes: a,
+      apply: async () => unwrap(await ctx.api('PUT', '/api/settings/student-creation', { mode: a.mode })) };
+  },
+}));
+
 const groupSchema = z.object({
   name: z.string().max(60).optional(),
   batch_ids: z.array(objId).min(1).max(40),

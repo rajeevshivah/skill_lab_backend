@@ -33,6 +33,10 @@ const organizationSchema = new mongoose.Schema({
     //   personal — roll + their own one-time code (from the trainer's list); a classmate cannot claim it
     //   batch    — roll + the batch code shown in class (quicker, less safe)
     studentSignup: { type: String, enum: ['personal', 'batch'], default: 'personal' },
+    // Who may put a NEW student into the college's student list (services/people.js):
+    //   trainers — adding a student to a batch creates them if the roll is new (default)
+    //   admin    — trainers can only add students already in the list (from the admin / an import)
+    studentCreation: { type: String, enum: ['trainers', 'admin'], default: 'trainers' },
     // Top students (services/topStudents.js): weights of the score out of 100,
     // and the cut-offs for the "Good" and "Excellent" labels.
     studentScore: {

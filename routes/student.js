@@ -136,6 +136,7 @@ router.put('/github', protectStudent, async (req, res) => {
   if (g && !/^https?:\/\/(www\.)?github\.com\/[A-Za-z0-9-]+\/?$/.test(g))
     return res.status(400).json({ message: 'Give your GitHub profile link, like https://github.com/yourname' });
   req.student.github = g; await req.student.save();
+  if (req.student.person) await require('../models/Person').updateOne({ _id: req.student.person }, { $set: { 'links.github': g } });
   res.json({ ok: true, github: g });
 });
 

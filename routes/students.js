@@ -10,6 +10,7 @@ const { protect, canAccessBatch, noCotrainer, seesAll } = require('../middleware
 const studentMerge = require('../services/studentMerge');
 const tempRoll = require('../services/tempRoll');
 const files = require('../services/fileStore');
+const people = require('../services/people');   // one Person per real student (services/people.js)
 const router  = express.Router();
 
 const MAX_IMPORT_ROWS = 1000;
@@ -115,10 +116,14 @@ router.post('/:id/merge', protect, noCotrainer, async (req, res) => {
   try {
     const { into, preview } = req.body || {};
     if (!into) return res.status(400).json({ message: 'Which record to keep (into)?' });
-    const dup = await Student.findById(req.params.id).select('batch').setOptions({ withDemo: true });
+    const dup = await Student.findById(req.params.id).select('batch person').setOptions({ withDemo: true });
     if (!dup) return res.status(404).json({ message: 'Student not found' });
     if (!(await canAccessBatch(req.user, dup.batch))) return res.status(403).json({ message: 'You can only merge students in your own batch' });
     const out = preview ? await studentMerge.preview(into, req.params.id) : await studentMerge.merge(into, req.params.id, req.user._id);
+    if (!preview && dup.person) {   // the duplicate's own person (a second person made by mistake) goes if nothing else uses it
+      const keep = await Student.findById(into).select('person').setOptions({ withDemo: true }).lean();
+      if (String(keep?.person || '') !== String(dup.person)) await people.afterRemove(dup.person);
+    }
     res.json(out);
   } catch (err) {
     if (err instanceof studentMerge.MergeError) return res.status(400).json({ message: err.message });
@@ -179,6 +184,12 @@ router.post('/', protect, async (req, res) => {
       v.doc.rollTemporary = true;
     }
 
+    // the college's student list first: an existing student (same roll + name) gets this batch
+    // place; a roll that belongs to someone with another name is refused, never a silent duplicate
+    const [match] = await people.matchRows([v.doc], req.user, { samePerson: req.body.samePerson === true && req.user.role === 'superadmin' });
+    if (match.action === 'refuse')
+      return res.status(409).json({ message: match.reason, ...(match.person ? { existing: { name: match.person.name, roll: match.person.roll } } : {}) });
+
     let photoDoc = { data: null, contentType: null };
     if (photo) {
       const p = sanitizePhoto(photo);
@@ -188,7 +199,10 @@ router.post('/', protect, async (req, res) => {
     const student = await Student.create({
       ...v.doc, batch, semester: batchDoc.semester, photo: photoDoc, addedBy: req.user._id,
     });
-    res.status(201).json({ student });
+    await people.linkNew([student], [match], req.user._id);
+    const alsoIn = match.action === 'attach'
+      ? (await Student.find({ person: student.person, _id: { $ne: student._id } }).select('batch').populate('batch', 'name').lean()).map(x => x.batch?.name || '?') : [];
+    res.status(201).json({ student, ...(alsoIn.length ? { alsoIn, warning: `${student.name} is also in ${alsoIn.join(', ')}.` } : {}) });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -254,6 +268,18 @@ router.post('/bulk', protect, async (req, res) => {
       }));
     }
 
+    // the college's student list: refused rows (roll held by someone with another name,
+    // or only the admin may add new students) are skipped and reported
+    const allMatches = await people.matchRows(docs, req.user);
+    const keepIdx = [];
+    allMatches.forEach((m, i) => {
+      if (m.action === 'refuse') skipped.push({ line: rows.findIndex(r => clean(r.roll) === docs[i].roll && clean(r.name) === docs[i].name) + 1, roll: docs[i].roll, name: docs[i].name, reason: m.reason });
+      else keepIdx.push(i);
+    });
+    const matches = keepIdx.map(i => allMatches[i]);
+    docs.splice(0, docs.length, ...keepIdx.map(i => docs[i]));
+    duplicates = duplicates.filter(d => docs.some(x => x.roll === d.roll));
+
     const noRoll = docs.filter(d => !d.roll);
     if (preview) {
       return res.json({
@@ -269,6 +295,7 @@ router.post('/bulk', protect, async (req, res) => {
 
     if (noRoll.length) (await tempRoll.issue(noRoll.length)).forEach((r, i) => { noRoll[i].roll = r; noRoll[i].rollTemporary = true; });
     const created = docs.length ? await Student.insertMany(docs) : [];
+    if (created.length) await people.linkNew(created, matches, req.user._id);
     res.status(201).json({
       imported: created.length, temporaryIds: noRoll.map(d => ({ name: d.name, roll: d.roll })),
       skipped, skippedCount: skipped.length,
@@ -286,6 +313,7 @@ router.put('/:id', protect, async (req, res) => {
       return res.status(403).json({ message: 'You can only edit students in your batch' });
 
     const { name, roll, course, sem, section, year, flagged, photo } = req.body;
+    const before = { name: existing.name, roll: existing.roll };
 
     // Validate identity fields only when they are actually being changed, so a
     // bare flag toggle can't trip the name check.
@@ -308,6 +336,8 @@ router.put('/:id', protect, async (req, res) => {
         });
         if (clash)
           return res.status(400).json({ message: `Roll ${v.doc.roll} already belongs to ${clash.name} in this batch.` });
+        const taken = await people.checkIdentityEdit(existing, { roll: v.doc.roll, rollTemporary: tempRoll.isTemp(v.doc.roll) });
+        if (taken) return res.status(409).json({ message: taken });
       }
       // a roll cleared → a new temporary ID (a student always has something to sign in with);
       // a real roll typed over a temporary one → it becomes the student's roll, sign-in keeps working
@@ -328,6 +358,8 @@ router.put('/:id', protect, async (req, res) => {
     }
     existing.updatedBy = req.user._id;
     await existing.save();
+    // the same name / roll on the student's main record and their other batch places
+    if (!existing.person || existing.name !== before.name || existing.roll !== before.roll) await people.syncIdentity(existing, req.user._id);
     // Same photo on the Hall of Fame wherever this student is in a Top 3
     if (photo !== undefined) await require('../services/studentPhoto').sync(existing._id);
     res.json({ student: existing });
@@ -377,6 +409,7 @@ router.delete('/:id', protect, noCotrainer, async (req, res) => {
       ProjectSubmission.deleteMany({ student: student._id }),
     ]);
     await Student.deleteOne({ _id: student._id });
+    await people.afterRemove(student.person);   // a person left with nothing goes too
     await require('../services/attendanceStats').recomputeBatchStats(student.batch);
     res.json({ message: 'Student deleted', removedMarks: force ? markCount : 0 });
   } catch (err) { res.status(500).json({ message: err.message }); }

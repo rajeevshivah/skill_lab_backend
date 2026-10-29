@@ -75,7 +75,7 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   console.log('\n1. Who sees which tools');
   const aNames = (await cA.listTools()).tools.map(t => t.name);
   const tNames = (await cT.listTools()).tools.map(t => t.name);
-  ok('superadmin sees 73 tools', aNames.length === 73, aNames.length);
+  ok('superadmin sees 74 tools', aNames.length === 74, aNames.length);
   ok('trainer sees 38 tools (no admin ones)', tNames.length === 38, tNames.length);
   ok('trainer does NOT see create_user / update_batch / plan_cycles / add_holiday', !['create_user', 'update_batch', 'plan_cycles', 'add_holiday', 'list_users', 'create_cycles'].some(n => tNames.includes(n)));
   ok('create_cycles is gone (plan_cycles replaces it)', !aNames.includes('create_cycles') && aNames.includes('plan_cycles'));
@@ -317,7 +317,7 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
     await Student.updateOne({ name: 'Aman' }, { $set: { course: 'B.Tech', sem: '3rd', section: 'A' } });
     const before = await Student.countDocuments({ person: null });
     const l = await yes(cA, 'link_people', {});
-    ok('link_people preview saves nothing and shows the plan', l.preview.data?.mode === 'preview' && l.preview.data.changes.newPeople >= 1 && l.preview.data.changes.newProgrammes.some(p => p.code === 'BTECH'), l.preview.text?.slice(0, 300));
+    ok('link_people preview saves nothing and shows the plan', l.preview.data?.mode === 'preview' && l.preview.data.changes.newPeople >= 1 && Array.isArray(l.preview.data.changes.doubtful), l.preview.text?.slice(0, 300));
     ok('link_people confirm links every record', l.saved.data?.saved && before > 0 && await Student.countDocuments({ person: null }) === 0, l.saved.text?.slice(0, 300));
     const lp = await call(cA, 'list_people', { q: 'Aman' });
     const aman = lp.data?.people?.[0];
