@@ -157,6 +157,67 @@ router.patch('/users/:id', protect, superadminOnly, async (req, res) => {
   }
 });
 
+// ── Sign out everywhere ─────────────────────────────────────────────
+// Bumping tokenVersion makes every sign-in made before it stop working at once
+// (middleware/auth.js, routes/student.js). AI connections use their own tokens
+// and keep working (remove them on the Connect AI page if needed).
+
+// PUT /api/auth/sign-out-others — end my other sign-ins; this device gets a fresh token
+router.put('/sign-out-others', protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    await user.save();
+    res.json({ ok: true, token: signToken(user, tenant.currentOrg()) });
+  } catch (err) { res.status(500).json({ message: 'Could not sign out the other devices.' }); }
+});
+
+// POST /api/auth/users/:id/sign-out  (college admin) — end every sign-in of one person
+router.post('/users/:id/sign-out', protect, superadminOnly, async (req, res) => {
+  try {
+    const user = await User.findOne({ _id: req.params.id, ...User.inOrg(tenant.currentOrg()) });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (user.platformOwner && !req.user.platformOwner)
+      return res.status(403).json({ message: 'This is the platform owner\'s account. Only the platform owner can change it.' });
+    if (String(user._id) === String(req.user._id))
+      return res.status(400).json({ message: 'To sign yourself out of other devices use "Sign out other devices" in your account menu.' });
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    await user.save();
+    res.json({ ok: true, message: `${user.name} is signed out on every device.` });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// POST /api/auth/sign-out-all { staff, students }  (college admin)
+// Everyone of THIS college signs in again. You stay signed in on this device.
+// The platform owner and people who also work for another college are left
+// alone (their sign-ins are shared with that college) — they are listed.
+router.post('/sign-out-all', protect, superadminOnly, async (req, res) => {
+  try {
+    const org = tenant.currentOrg();
+    const staff = req.body?.staff !== false, students = req.body?.students === true;
+    if (!staff && !students) return res.status(400).json({ message: 'Choose staff, students or both.' });
+    const out = { staff: 0, students: 0, skipped: [] };
+    if (staff) {
+      const users = await User.find(User.inOrg(org)).select('name email platformOwner memberships tokenVersion');
+      const ids = [];
+      for (const u of users) {
+        if (String(u._id) === String(req.user._id)) continue;
+        if (u.platformOwner) { out.skipped.push(`${u.name} (platform owner)`); continue; }
+        if ((u.memberships || []).some(m => String(m.org) !== String(org))) { out.skipped.push(`${u.name} (also works with another college)`); continue; }
+        ids.push(u._id);
+      }
+      if (ids.length) await User.updateMany({ _id: { $in: ids } }, { $inc: { tokenVersion: 1 } });
+      out.staff = ids.length;
+    }
+    if (students) {
+      const Student = require('../models/Student');
+      const r = await Student.updateMany({ 'login.activatedAt': { $ne: null } }, { $inc: { 'login.tokenVersion': 1 } }).setOptions({ withDemo: true });
+      out.students = r.modifiedCount ?? r.nModified ?? 0;
+    }
+    res.json({ ok: true, ...out });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
 // DELETE /api/auth/users/:id  (college admin) — removes them from THIS college
 router.delete('/users/:id', protect, superadminOnly, async (req, res) => {
   try {

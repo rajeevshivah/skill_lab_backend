@@ -159,6 +159,47 @@ admin(writeTool({
 }));
 
 admin(writeTool({
+  name: 'sign_out_everywhere',
+  title: 'Sign people out on every device',
+  description: 'Superadmin only. Ends sign-ins so people must log in again — e.g. a shared or leaked password, a lost phone, someone who left. ' +
+    'Give ONE of: user (email or name of one staff member), all_staff=true (every trainer/admin/management login of this college except you), ' +
+    'all_students=true (every student who has set up). all_staff and all_students can be combined. Passwords do not change. ' +
+    'The platform owner and people who also work for another college are not touched by all_staff. AI connections (tokens) keep working. ' +
+    'To sign YOURSELF out of other devices use the website account menu ("Sign out other devices").',
+  input: {
+    user: z.string().optional().describe('Email or name of one staff member'),
+    all_staff: z.boolean().optional(),
+    all_students: z.boolean().optional(),
+  },
+  async plan(args, me, ctx) {
+    const org = tenant.currentOrg();
+    if (args.user && (args.all_staff || args.all_students)) throw new ToolError('Give either one user, or all_staff / all_students — not both.');
+    if (args.user) {
+      const u = await findUser(args.user);
+      if (String(u._id) === String(me._id)) throw new ToolError('That is you. Use "Sign out other devices" in your account menu on the website.');
+      if (u.platformOwner && !me.platformOwner) throw new ToolError('This is the platform owner\'s account. Only the platform owner can change it.');
+      const shared = (u.memberships || []).some(m => String(m.org) !== String(org));
+      return {
+        summary: `Sign out ${u.name} <${u.email}> on every device`,
+        changes: { user: u.name, email: u.email, role: u.role, password: 'unchanged' },
+        warnings: shared ? [`${u.name} also works with another college; they are signed out there too.`] : [],
+        apply: async () => unwrap(await ctx.api('POST', `/api/auth/users/${u._id}/sign-out`)),
+      };
+    }
+    if (!args.all_staff && !args.all_students) throw new ToolError('Say who: user, all_staff and/or all_students.');
+    const users = args.all_staff ? await User.find(User.inOrg(org)).select('name platformOwner memberships') : [];
+    const staffCount = users.filter(u => String(u._id) !== String(me._id) && !u.platformOwner && !(u.memberships || []).some(m => String(m.org) !== String(org))).length;
+    const studentCount = args.all_students ? await Student.countDocuments({ 'login.activatedAt': { $ne: null } }).setOptions({ withDemo: true }) : 0;
+    return {
+      summary: `Sign out ${[args.all_staff && `${staffCount} staff login(s)`, args.all_students && `${studentCount} student(s)`].filter(Boolean).join(' and ')} on every device`,
+      changes: { staff: args.all_staff ? staffCount : 0, students: studentCount, you: 'stay signed in', passwords: 'unchanged' },
+      warnings: ['Everyone listed has to sign in again with their password — tell them before you do this during class.'],
+      apply: async () => unwrap(await ctx.api('POST', '/api/auth/sign-out-all', { staff: !!args.all_staff, students: !!args.all_students })),
+    };
+  },
+}));
+
+admin(writeTool({
   name: 'update_user',
   title: 'Update a user (rename, role, activate/deactivate, reset password)',
   description:

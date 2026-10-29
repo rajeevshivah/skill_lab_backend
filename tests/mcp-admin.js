@@ -75,7 +75,7 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
   console.log('\n1. Who sees which tools');
   const aNames = (await cA.listTools()).tools.map(t => t.name);
   const tNames = (await cT.listTools()).tools.map(t => t.name);
-  ok('superadmin sees 63 tools', aNames.length === 63, aNames.length);
+  ok('superadmin sees 64 tools', aNames.length === 64, aNames.length);
   ok('trainer sees 38 tools (no admin ones)', tNames.length === 38, tNames.length);
   ok('trainer does NOT see create_user / update_batch / plan_cycles / add_holiday', !['create_user', 'update_batch', 'plan_cycles', 'add_holiday', 'list_users', 'create_cycles'].some(n => tNames.includes(n)));
   ok('create_cycles is gone (plan_cycles replaces it)', !aNames.includes('create_cycles') && aNames.includes('plan_cycles'));
@@ -295,6 +295,20 @@ const login = (email, password) => http('POST', '/api/auth/login', { body: { ema
     const f = await yes(cA, 'remove_student', { student_ids: [String(marked._id)], force: true });
     ok('admin force removes it with its marks', f.saved.data?.saved && !(await Student.exists({ _id: marked._id })) && !(await CycleMark.exists({ student: marked._id })), f.saved.text?.slice(0, 300));
     ok('unknown id is refused', (await call(cA, 'remove_student', { student_ids: ['6a0000000000000000000000'] })).isError);
+  }
+
+  console.log('\n9. Sign out everywhere');
+  {
+    const saifTok = (await login('saif@x.com', 'longpassword1')).body.token;
+    const one = await yes(cA, 'sign_out_everywhere', { user: 'saif@x.com' });
+    ok('one user: preview names them', /Saif Ali/.test(one.preview.data?.summary || ''), one.preview.text?.slice(0, 200));
+    ok('one user: signed out', one.saved.data?.saved && (await http('GET', '/api/auth/me', { token: saifTok })).status === 401, one.saved.text?.slice(0, 200));
+    ok('a trainer cannot use it', (await call(cT, 'sign_out_everywhere', { user: 'saif@x.com' })).isError);
+    ok('yourself is refused', (await call(cA, 'sign_out_everywhere', { user: 'admin@sheat.ac.in' })).isError);
+    ok('both a user and all_staff is refused', (await call(cA, 'sign_out_everywhere', { user: 'saif@x.com', all_staff: true })).isError);
+    const all = await call(cA, 'sign_out_everywhere', { all_staff: true });
+    ok('all staff: preview counts everyone but me', all.data?.changes?.staff >= 2 && all.data?.changes?.you === 'stay signed in', all.text?.slice(0, 200));
+    ok('the AI connection still works after a sign-out', !(await call(cA, 'whoami')).isError);
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

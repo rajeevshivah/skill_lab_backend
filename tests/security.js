@@ -199,6 +199,35 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwA
   ok('broken JSON → 400, no details', r.status === 400 && !/SyntaxError|at /.test(r.text), r.text);
   ok('no x-powered-by', !r.headers.get('x-powered-by'));
 
+  step('Sign out everywhere');
+  {
+    const tR1 = await login('rohit@x.com'), tR2 = await login('rohit@x.com');
+    ok('a trainer cannot sign others out', (await http('POST', `/api/auth/users/${mgmt._id}/sign-out`, { token: tR1 })).status === 403);
+    r = await http('PUT', '/api/auth/sign-out-others', { token: tR1 });
+    ok('sign out my other devices: this one gets a fresh token', r.status === 200 && r.body.token, r.body);
+    const tR3 = r.body.token;
+    ok('…my other device is signed out', (await http('GET', '/api/auth/me', { token: tR2 })).status === 401);
+    ok('…this device still works', (await http('GET', '/api/auth/me', { token: tR3 })).status === 200);
+    ok('…and the password still works', !!(await login('rohit@x.com')));
+    const tAd = await login('admin@x.com'), tMd = await login('md@x.com');
+    r = await http('POST', `/api/auth/users/${mgmt._id}/sign-out`, { token: tAd });
+    ok('admin signs one person out', r.status === 200 && (await http('GET', '/api/auth/me', { token: tMd })).status === 401, r.body);
+    ok('admin cannot sign out the platform owner', (await http('POST', `/api/auth/users/${owner._id}/sign-out`, { token: tAd })).status === 403);
+    ok('admin uses the account menu for themselves', (await http('POST', `/api/auth/users/${admin._id}/sign-out`, { token: tAd })).status === 400);
+    const tOw = await login('owner@x.com'), tRo = await login('rohit@x.com');
+    const stu = (await http('POST', '/api/student/login', { body: { roll: 'R001', password: 'student-pw3' } })).body?.token;
+    ok('only the admin can sign everyone out', (await http('POST', '/api/auth/sign-out-all', { token: tRo, body: { staff: true } })).status === 403);
+    r = await http('POST', '/api/auth/sign-out-all', { token: tAd, body: { staff: true, students: true } });
+    ok('sign out everyone: staff and students counted', r.status === 200 && r.body.staff >= 3 && r.body.students >= 1, r.body);
+    ok('…a trainer is signed out', (await http('GET', '/api/auth/me', { token: tRo })).status === 401);
+    ok('…a student is signed out', (await http('GET', '/api/student/me', { token: stu })).status === 401);
+    ok('…the admin who did it stays signed in', (await http('GET', '/api/auth/me', { token: tAd })).status === 200);
+    ok('…the platform owner is left alone', (await http('GET', '/api/auth/me', { token: tOw })).status === 200 && r.body.skipped.some(x => /owner/.test(x)), r.body);
+    ok('…everyone signs in again with the same password', !!(await login('rohit@x.com')) &&
+      (await http('POST', '/api/student/login', { body: { roll: 'R001', password: 'student-pw3' } })).status === 200);
+    ok('nothing chosen is refused', (await http('POST', '/api/auth/sign-out-all', { token: tAd, body: { staff: false, students: false } })).status === 400);
+  }
+
   step('Failed-attempt limits (a forged address does not help)');
   // like Render: the proxy adds the real address last, whatever the caller wrote before it
   const ip = () => `${1 + Math.floor(Math.random() * 200)}.${Math.floor(Math.random() * 250)}.1.${Math.floor(Math.random() * 250)}, 203.0.113.7`;
