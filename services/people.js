@@ -39,16 +39,14 @@ function sameName(a, b) {
 
 const normRoll = (r) => String(r || '').trim().toUpperCase();
 
-// one edit apart (an extra / missing / wrong character): 1242580900100 vs 124258090100
+// one character added or dropped (a typo): 1242580900100 vs 124258090100.
+// A changed character is NOT flagged — rolls are given alphabetically, so two
+// different students with the same name often have neighbouring rolls (…065, …066).
 function nearRoll(a, b) {
-  if (!a || !b || a === b || Math.abs(a.length - b.length) > 1) return false;
-  let i = 0, j = 0, edits = 0;
-  while (i < a.length && j < b.length) {
-    if (a[i] === b[j]) { i++; j++; continue; }
-    if (++edits > 1) return false;
-    if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; }
-  }
-  return edits + (a.length - i) + (b.length - j) <= 1;
+  if (!a || !b || Math.abs(a.length - b.length) !== 1) return false;
+  const [long, short] = a.length > b.length ? [a, b] : [b, a];
+  for (let i = 0; i < long.length; i++) if (long.slice(0, i) + long.slice(i + 1) === short) return true;
+  return false;
 }
 
 // Known programmes: code → defaults. Anything else becomes its own programme.
@@ -66,6 +64,25 @@ const KNOWN = {
   DIPLOMA: { name: 'Diploma', level: 'diploma', durationYears: 3 },
 };
 const courseCode = (course) => String(course || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20);
+
+// Branches: other spellings → one code, and its name.
+const BRANCH_ALIAS = { DATASCIENCE: 'DS', CSEDS: 'DS', MECHANICAL: 'ME', MECH: 'ME', CIVIL: 'CE', ELECTRICAL: 'EE',
+  CSAIML: 'CSEAIML', AIMLCSE: 'CSEAIML', COMPUTERSCIENCE: 'CSE', CS: 'CSE' };
+const BRANCH_NAME = { CSE: 'Computer Science & Engineering', CSEAIML: 'CSE (AI & ML)', AIML: 'AI & ML', DS: 'Data Science',
+  ME: 'Mechanical Engineering', EEE: 'Electrical & Electronics Engineering', EE: 'Electrical Engineering', ECE: 'Electronics & Communication',
+  CE: 'Civil Engineering', IT: 'Information Technology' };
+const KNOWN_BY_LENGTH = () => Object.keys(KNOWN).sort((a, b) => b.length - a.length);
+
+// "B.Tech CSE(AIML)" → { programme: 'BTECH', branch: 'CSEAIML' }; "BCA" → { programme: 'BCA', branch: '' }
+function parseCourse(course) {
+  const all = courseCode(String(course || '').replace(/\s+/g, ' '));
+  if (!all) return null;
+  const known = KNOWN_BY_LENGTH().find(k => all.startsWith(k));
+  if (!known) return { programme: all, branch: '' };
+  let branch = all.slice(known.length);
+  branch = BRANCH_ALIAS[branch] || branch;
+  return { programme: known, branch: branch.slice(0, 20) };
+}
 
 // "3rd Sem" → 3, "1" → 1, "" → null
 function semesterNo(sem) {
@@ -165,26 +182,33 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
   // programmes by code / alias, made on demand (plan: in memory only)
   const progByCode = new Map();
   for (const p of programmes) { progByCode.set(p.code, p); for (const a of p.aliases || []) if (!progByCode.has(a)) progByCode.set(a, p); }
-  const newProgrammes = [];
+  const newProgrammes = [], newBranches = [];
   const programmeFor = (course) => {
-    const code = courseCode(course);
-    if (!code) return null;
-    if (progByCode.has(code)) return progByCode.get(code);
-    const k = KNOWN[code] || { name: String(course).trim().slice(0, 80), level: 'ug', durationYears: 4 };
-    const p = { _id: null, code, name: k.name, level: k.level, durationYears: k.durationYears, termsPerYear: 2, branches: [], aliases: [], _new: true };
-    progByCode.set(code, p); newProgrammes.push(p);
-    return p;
+    const c = parseCourse(course);
+    if (!c) return null;
+    let p = progByCode.get(c.programme);
+    if (!p) {
+      const k = KNOWN[c.programme] || { name: String(course).trim().slice(0, 80), level: 'ug', durationYears: 4 };
+      p = { _id: null, code: c.programme, name: k.name, level: k.level, durationYears: k.durationYears, termsPerYear: 2, branches: [], aliases: [], _new: true };
+      progByCode.set(c.programme, p); newProgrammes.push(p);
+    }
+    if (c.branch && !p.branches.some(b => b.code === c.branch)) {
+      p.branches = [...p.branches, { code: c.branch, name: BRANCH_NAME[c.branch] || c.branch, isActive: true }];
+      p._branchesChanged = true;
+      newBranches.push(`${p.name} ${c.branch}`);
+    }
+    return { prog: p, branch: c.branch };
   };
   // cohorts by programme + branch + year
   const cohortKey = (progCode, branch, year) => `${progCode}|${branch}|${year}`;
   const progCodeById = new Map(programmes.map(p => [String(p._id), p.code]));
   const cohortBy = new Map(cohorts.map(c => [cohortKey(progCodeById.get(String(c.programme)), c.branch || '', c.admissionYear), c]));
   const newCohorts = [];
-  const cohortFor = (prog, year, section) => {
+  const cohortFor = (prog, branch, year, section) => {
     if (!prog || !year) return null;
-    const k = cohortKey(prog.code, '', year);
+    const k = cohortKey(prog.code, branch, year);
     let c = cohortBy.get(k);
-    if (!c) { c = { _id: null, prog, branch: '', admissionYear: year, name: cohortName(prog, '', year), sections: [], _new: true }; cohortBy.set(k, c); newCohorts.push(c); }
+    if (!c) { c = { _id: null, prog, branch, admissionYear: year, name: cohortName(prog, branch, year), sections: [], _new: true }; cohortBy.set(k, c); newCohorts.push(c); }
     if (section && !c.sections.some(s => s.code === section)) { c.sections.push({ code: section, isActive: true }); c._sectionsChanged = true; }
     return c;
   };
@@ -236,10 +260,11 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
     // the person's details come from the newest record (active semester first)
     const latest = [...recs].sort((a, b) => (semStart.get(String(b.semester)) || 0) - (semStart.get(String(a.semester)) || 0)
       || new Date(b.updatedAt) - new Date(a.updatedAt))[0];
-    const prog = programmeFor(latest.course);
+    const place = programmeFor(latest.course);
+    const prog = place?.prog || null, branch = place?.branch || '';
     const semNo = semesterNo(latest.sem);
     const section = sectionCode(latest.section);
-    const cohort = cohortFor(prog, admissionYear(semStart.get(String(latest.semester)), semNo, prog?.termsPerYear || 2), section);
+    const cohort = cohortFor(prog, branch, admissionYear(semStart.get(String(latest.semester)), semNo, prog?.termsPerYear || 2), section);
     const existing = key.startsWith('person:') ? personById.get(key.slice(7)) : null;
     plans.push({
       existing, recs, prog, cohort,
@@ -247,16 +272,16 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
         name: latest.name, roll: latest.roll || '', rollTemporary: !!(latest.rollTemporary || tempRoll.isTemp(latest.roll)),
         demo: recs.every(r => r.demo),
         github: recs.map(r => r.github).find(Boolean) || '',
-        semesterNo: semNo, section,
+        semesterNo: semNo, section, branch,
       },
     });
   }
 
-  // possible same person made separately: same name + same programme/semester, one roll temporary or one character apart
+  // possible same person made separately: same name, and one roll temporary or a character added/dropped
   const possibleSame = [];
   const loose = plans.filter(p => !p.doc.demo);
   const byName = new Map();
-  for (const p of loose) { const k = `${normName(p.doc.name)}|${p.prog?.code || ''}|${p.doc.semesterNo || ''}`; (byName.get(k) || byName.set(k, []).get(k)).push(p); }
+  for (const p of loose) { const k = normName(p.doc.name); (byName.get(k) || byName.set(k, []).get(k)).push(p); }
   for (const list of byName.values()) {
     for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
       const a = list[i].doc, b = list[j].doc;
@@ -270,7 +295,7 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
     const e = p.existing; if (!e) return true;
     return e.name !== p.doc.name || (e.roll || '') !== p.doc.roll || !!e.rollTemporary !== p.doc.rollTemporary
       || String(e.academic?.programme || '') !== String(p.prog?._id || '') || String(e.academic?.cohort || '') !== String(p.cohort?._id || '')
-      || (e.academic?.section || '') !== p.doc.section || (e.academic?.semesterNo ?? null) !== p.doc.semesterNo
+      || (e.academic?.section || '') !== p.doc.section || (e.academic?.branch || '') !== p.doc.branch || (e.academic?.semesterNo ?? null) !== p.doc.semesterNo
       || (!e.links?.github && !!p.doc.github);
   };
   const unlinkedRecs = (p) => p.recs.filter(r => !p.existing || String(r.person || '') !== String(p.existing._id));
@@ -283,6 +308,7 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
     recordsToLink: plans.reduce((n, p) => n + unlinkedRecs(p).length, 0),
     inSeveralBatches: plans.filter(p => p.recs.length > 1).map(p => ({ name: p.doc.name, roll: p.doc.roll, batches: p.recs.map(r => batchName.get(String(r.batch)) || '?') })),
     newProgrammes: newProgrammes.map(p => ({ code: p.code, name: p.name, level: p.level, durationYears: p.durationYears })),
+    newBranches,
     newCohorts: newCohorts.map(c => c.name),
     doubtful,
     possibleSame,
@@ -292,12 +318,13 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
 
   // ── apply ──
   for (const p of newProgrammes) {
-    const made = await Programme.create({ code: p.code, name: p.name, level: p.level, durationYears: p.durationYears, createdBy: userId });
+    const made = await Programme.create({ code: p.code, name: p.name, level: p.level, durationYears: p.durationYears, branches: p.branches, createdBy: userId });
     p._id = made._id;
   }
+  for (const p of new Set(progByCode.values())) if (!p._new && p._branchesChanged) await Programme.updateOne({ _id: p._id }, { $set: { branches: p.branches } });
   for (const c of cohortBy.values()) {
     if (c._new) {
-      const made = await Cohort.create({ programme: c.prog._id, branch: '', admissionYear: c.admissionYear, name: c.name, sections: c.sections, createdBy: userId });
+      const made = await Cohort.create({ programme: c.prog._id, branch: c.branch, admissionYear: c.admissionYear, name: c.name, sections: c.sections, createdBy: userId });
       c._id = made._id;
     } else if (c._sectionsChanged) {
       await Cohort.updateOne({ _id: c._id }, { $set: { sections: c.sections } });
@@ -308,7 +335,7 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
     const set = {
       name: p.doc.name, roll: p.doc.roll, rollTemporary: p.doc.rollTemporary,
       'academic.programme': p.prog?._id || null, 'academic.cohort': p.cohort?._id || null,
-      'academic.section': p.doc.section, 'academic.semesterNo': p.doc.semesterNo,
+      'academic.section': p.doc.section, 'academic.semesterNo': p.doc.semesterNo, 'academic.branch': p.doc.branch,
     };
     if (p.existing) {
       if (!p.existing.links?.github && p.doc.github) set['links.github'] = p.doc.github;
@@ -317,7 +344,7 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
     } else {
       const made = await Person.create({
         name: p.doc.name, roll: p.doc.roll, rollTemporary: p.doc.rollTemporary, demo: p.doc.demo, source: 'training',
-        academic: { programme: p.prog?._id || null, cohort: p.cohort?._id || null, section: p.doc.section, semesterNo: p.doc.semesterNo },
+        academic: { programme: p.prog?._id || null, branch: p.doc.branch, cohort: p.cohort?._id || null, section: p.doc.section, semesterNo: p.doc.semesterNo },
         links: { github: p.doc.github }, createdBy: userId,
       });
       p.id = made._id;
@@ -330,4 +357,4 @@ async function link({ apply = false, merge = [], userId = null } = {}) {
   return { applied: true, ...summary, linked: studentOps.length };
 }
 
-module.exports = { link, LinkError, checkCustom, sameName, nearRoll, normName, courseCode, semesterNo, sectionCode, admissionYear, KNOWN };
+module.exports = { link, LinkError, parseCourse, checkCustom, sameName, nearRoll, normName, courseCode, semesterNo, sectionCode, admissionYear, KNOWN };

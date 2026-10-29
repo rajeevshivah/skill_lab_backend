@@ -59,6 +59,13 @@ const http = async (method, path, { token, body } = {}) => {
   // two different students who share a common name, rolls far apart → NOT flagged
   await add(B3, 'Shivam Yadav', '124258090065', { course: 'BCA', sem: '3rd', section: 'B' });
   await add(B3, 'Shivam Yadav', '124258090150', { course: 'BCA', sem: '3rd', section: 'B' });
+  // neighbouring rolls, same name (rolls are alphabetical) → NOT flagged
+  await add(B3A, 'Khushi Singh', '12525809065', { course: 'BCA', sem: '1st', section: 'A' });
+  await add(B3A, 'Khushi Singh', '12525809066', { course: 'BCA', sem: '1st', section: 'A' });
+  // branch inside the course text → B.Tech + branch
+  const cse = await add(BD, 'Aman Verma', '2303840100001', { course: 'B.Tech CSE(AIML)', sem: '7th', section: 'A' });
+  // a self-signup copy with no course and an extra digit → possible same
+  await add(B3, 'ravi kumar', '1242580903000', {});
   // temporary id, same name as a real one → possible same
   const tmp = await add(B3A, 'Anis Saroj', 'TMP-ABCDE', { rollTemporary: true, course: 'BCA', sem: '3rd', section: 'A' });
   await add(B3, 'Anis Saroj', '124258090115', { course: 'BCA', sem: '3rd', section: 'B' });
@@ -79,7 +86,8 @@ const http = async (method, path, { token, body } = {}) => {
   console.log('\n— Helpers');
   ok('names: middle name / case / dots match', people.sameName('Priya Yadav', 'PRIYA K. YADAV') && people.sameName('Rohit .', 'rohit'));
   ok('names: different people do not match', !people.sameName('Govind Kumar Saroj', 'Priya Prajapati') && !people.sameName('Priya', 'Priya Yadav'));
-  ok('rolls one character apart', people.nearRoll('1242580900100', '124258090100') && !people.nearRoll('124258090065', '124258090150'));
+  ok('rolls: a digit added/dropped is near; a changed digit is not', people.nearRoll('1242580900100', '124258090100') && !people.nearRoll('12525809065', '12525809066') && !people.nearRoll('124258090065', '124258090150'));
+  ok('course text → programme + branch', JSON.stringify(people.parseCourse('B.Tech CSE(AIML)')) === '{"programme":"BTECH","branch":"CSEAIML"}' && people.parseCourse('B.Tech Data Science').branch === 'DS' && people.parseCourse('B.Tech DS').branch === 'DS' && people.parseCourse('BCA').branch === '');
   ok('semester / section / course parsing', people.semesterNo('3rd Sem') === 3 && people.sectionCode('Sec A') === 'A' && people.sectionCode('section-b') === 'B' && people.courseCode('B.Tech') === 'BTECH');
   ok('admission year: odd 2026-27, 3rd sem → 2025; even 2025-26, 2nd sem → 2025', people.admissionYear('2026-07-20', 3) === 2025 && people.admissionYear('2026-01-12', 2) === 2025 && people.admissionYear('2026-07-20', 1) === 2026);
 
@@ -95,8 +103,11 @@ const http = async (method, path, { token, body } = {}) => {
   ok('near roll + same name → possible same', plan.possibleSame.some(p => p.reason.includes('one character') && [...p.a, ...p.b].some(x => x.roll === '1242580900100')), plan.possibleSame);
   ok('temporary id + same name → possible same', plan.possibleSame.some(p => p.reason.includes('temporary')));
   ok('common name, far rolls → not flagged', !plan.possibleSame.some(p => [...p.a, ...p.b].some(x => x.name === 'Shivam Yadav')));
+  ok('same name, neighbouring rolls → not flagged', !plan.possibleSame.some(p => [...p.a, ...p.b].some(x => x.name === 'Khushi Singh')));
+  ok('copy with no course + extra digit → flagged', plan.possibleSame.some(p => [...p.a, ...p.b].some(x => x.roll === '1242580903000')));
+  ok('branch from the course becomes a branch, not a programme', plan.newBranches.includes('B.Tech CSEAIML') && plan.newCohorts.includes('B.Tech CSEAIML 2023–27'), plan);
   ok('B.Tech / BTECH → one programme; BCA another', plan.newProgrammes.length === 2 && plan.newProgrammes.some(p => p.code === 'BTECH' && p.name === 'B.Tech' && p.durationYears === 4) && plan.newProgrammes.some(p => p.code === 'BCA' && p.durationYears === 3), plan.newProgrammes);
-  ok('cohorts by admission year', plan.newCohorts.includes('B.Tech 2025–29') && plan.newCohorts.includes('BCA 2025–28') && plan.newCohorts.length === 2, plan.newCohorts);
+  ok('cohorts by admission year', plan.newCohorts.includes('B.Tech 2025–29') && plan.newCohorts.includes('BCA 2025–28') && plan.newCohorts.includes('BCA 2026–29') && plan.newCohorts.length === 4, plan.newCohorts);
   ok('a record with no course is reported', plan.withoutProgramme.some(x => x.name === 'Walk In'));
   const expectPeople = total - 2 /* doubtful */ - 1 /* priya 2nd record */ - 1 /* ravi old */;
   ok('people count', plan.people === expectPeople - 0 && plan.newPeople === plan.people, `${plan.people} vs ${expectPeople}`);
@@ -118,6 +129,8 @@ const http = async (method, path, { token, body } = {}) => {
   ok('possible-same made separately', String((await M('Student').findById(sahil._id)).person) !== String((await M('Student').findById(sahil2._id)).person));
   ok('temporary id kept on the person', (await M('Person').findById((await M('Student').findById(tmp._id)).person)).rollTemporary === true);
   ok('demo record → demo person', await M('Person').exists({ name: 'MD Demo Student', demo: true }));
+  const amanP = await M('Person').findById((await M('Student').findById(cse._id)).person).populate('academic.programme academic.cohort').lean();
+  ok('person: B.Tech + branch + branch cohort', amanP.academic.programme.code === 'BTECH' && amanP.academic.branch === 'CSEAIML' && amanP.academic.cohort.branch === 'CSEAIML' && amanP.academic.programme.branches.some(b => b.code === 'CSEAIML' && b.name === 'CSE (AI & ML)'), amanP.academic);
   const bca = await M('Cohort').findOne({ name: 'BCA 2025–28' }).lean();
   ok('cohort sections collected', bca.sections.map(s => s.code).sort().join() === 'A,B', bca.sections);
   ok('other college untouched', await tenant.run(other._id, async () => !(await M('Student').exists({ person: { $ne: null } })) && !(await M('Person').exists({}))));
@@ -169,8 +182,8 @@ const http = async (method, path, { token, body } = {}) => {
   r = await http('POST', '/api/academics/programmes', { token: T(admin), body: { code: 'MCA', name: 'MCA', level: 'pg', durationYears: 2 } });
   ok('add programme', r.status === 201 && r.body.programme.code === 'MCA');
   ok('management cannot add', (await http('POST', '/api/academics/programmes', { token: T(md), body: { code: 'MBA', name: 'MBA' } })).status === 403);
-  r = await http('PATCH', `/api/academics/programmes/${btech._id}`, { token: T(admin), body: { branches: [{ code: 'cse', name: 'Computer Science' }, { code: 'AIML', name: 'AI & ML' }], aliases: ['B TECH'] } });
-  ok('branches + aliases', r.status === 200 && r.body.programme.branches.length === 2 && r.body.programme.branches[0].code === 'CSE' && r.body.programme.aliases[0] === 'BTECH', r.body);
+  r = await http('PATCH', `/api/academics/programmes/${btech._id}`, { token: T(admin), body: { branches: [{ code: 'cse', name: 'Computer Science' }, { code: 'AIML', name: 'AI & ML' }, { code: 'CSEAIML', name: 'CSE (AI & ML)' }], aliases: ['B TECH'] } });
+  ok('branches + aliases', r.status === 200 && r.body.programme.branches.length === 3 && r.body.programme.branches[0].code === 'CSE' && r.body.programme.aliases[0] === 'BTECH', r.body);
   r = await http('PATCH', `/api/academics/programmes/${btech._id}`, { token: T(admin), body: { branches: [{ code: 'CSE', name: 'x' }, { code: 'CSE', name: 'y' }] } });
   ok('branch listed twice refused', r.status === 400);
   r = await http('POST', '/api/academics/cohorts', { token: T(admin), body: { programme: btech._id, branch: 'CSE', admissionYear: 2024, sections: ['A', 'b'] } });
@@ -196,7 +209,7 @@ const http = async (method, path, { token, body } = {}) => {
   ok('bad status refused', (await P({ status: 'expelled' })).status === 400);
   r = await http('PATCH', `/api/academics/cohorts/${cse24._id}`, { token: T(admin), body: { sections: ['A'] } });
   ok('section with students cannot be removed', r.status === 400 && /section B/.test(r.body.message), r.body);
-  r = await http('PATCH', `/api/academics/programmes/${btech._id}`, { token: T(admin), body: { branches: [{ code: 'AIML', name: 'AI & ML' }] } });
+  r = await http('PATCH', `/api/academics/programmes/${btech._id}`, { token: T(admin), body: { branches: [{ code: 'AIML', name: 'AI & ML' }, { code: 'CSEAIML', name: 'x' }] } });
   ok('branch with students cannot be removed', r.status === 400);
   ok('switching it off is fine', (await http('PATCH', `/api/academics/cohorts/${cse24._id}`, { token: T(admin), body: { sections: ['A', { code: 'B', isActive: false }] } })).status === 200);
 
