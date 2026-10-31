@@ -22,7 +22,7 @@ const sign = (p) => jwt.sign({ pid: p._id, kind: 'student', org: p.org, v: p.log
 async function moveLogins({ all = false, personIds = null } = {}) {
   const opt = { withDemo: true, ...(all ? { allOrgs: true } : {}) };
   const recs = await Student.find({ person: personIds ? { $in: personIds } : { $ne: null }, 'login.passwordHash': { $ne: null } })
-    .select('+login.passwordHash person login').setOptions(opt).lean();
+    .select('+login.passwordHash person login.activatedAt login.lastLoginAt').setOptions(opt).lean();   // (never a path and its parent together — MongoDB refuses that)
   if (!recs.length) return { moved: 0 };
   const people = await Person.find({ _id: { $in: [...new Set(recs.map(r => String(r.person)))] } })
     .select('+login.passwordHash').setOptions(all ? { allOrgs: true } : {}).lean();

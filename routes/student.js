@@ -162,7 +162,7 @@ async function frame(req) {
     profile.studentFields(),
   ]);
   const files = require('../services/fileStore');
-  const withPhoto = await Person.findById(req.person._id).select('+photo.data photo').lean();
+  const withPhoto = await Person.findById(req.person._id).select('+photo.data photo.contentType photo.key').lean();
   // the photo: on the main record, or (set before the move) on the batch place
   let photo = files.publicUrl(withPhoto?.photo) || await files.dataUrl(withPhoto?.photo);
   if (!photo && req.student?.photo?.contentType) photo = files.publicUrl(req.student.photo) || await files.dataUrl(req.student.photo);

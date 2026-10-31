@@ -15,6 +15,15 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwA
 (async () => {
   let mongod = null;
   if (!process.env.TEST_MONGO_URI) { const { MongoMemoryServer } = require('mongodb-memory-server'); mongod = await MongoMemoryServer.create(); }
+  // Real MongoDB (4.4+) refuses a projection with a path AND its parent ({ login: 1, 'login.passwordHash': 1 }:
+  // "Path collision"); the test database does not — so every query is checked here.
+  const collisions = [];
+  mongoose.set('debug', (coll, method, ...args) => {
+    const proj = args.find(a => a && typeof a === 'object' && a.projection)?.projection;
+    if (!proj) return;
+    const keys = Object.keys(proj);
+    for (const k of keys) if (keys.some(o => o !== k && k.startsWith(o + '.'))) collisions.push(`${coll}.${method}: ${keys.join(', ')}`);
+  });
   await mongoose.connect(process.env.TEST_MONGO_URI || mongod.getUri());
   if (process.env.TEST_MONGO_URI) await mongoose.connection.dropDatabase();
   const M = (n) => require('../models/' + n);
@@ -181,6 +190,9 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwA
   ok('a staff token is not a student token', (await http('GET', '/api/student/me', { token: tAd })).status === 401);
   ok('a student token is not a staff token', (await http('GET', '/api/people', { token: tA })).status === 401);
   ok('a token for a person of another college fails', (await http('GET', '/api/student/me', { token: jwt.sign({ pid: new mongoose.Types.ObjectId(), kind: 'student', v: 0 }, process.env.JWT_SECRET) })).status === 401);
+
+  step('Every query works on real MongoDB');
+  ok('no query asks for a path and its parent together', collisions.length === 0, [...new Set(collisions)]);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   if (fail) console.log('FAILED:', fails.join(' | '));
