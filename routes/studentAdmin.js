@@ -14,6 +14,8 @@ const crypto   = require('crypto');
 const perf     = require('../services/performance');
 const sv       = require('../services/studentView');
 const files = require('../services/fileStore');
+const access = require('../services/studentAccess');
+const Person = require('../models/Person');
 const router   = express.Router();
 
 const ALPHA = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -40,13 +42,15 @@ router.get('/batch/:id', protect, async (req, res) => {
     if (!(await guard(req, res, b._id))) return;
     if (!b.joinCode) { b.joinCode = await newJoinCode(b.semester); await b.save(); }
     const mode = await codes.mode();
-    const students = await Student.find({ batch: b._id }).select('name roll rollTemporary demo login.activatedAt login.lastLoginAt github photo.contentType').sort('roll').setOptions({ withDemo: true }).lean();
+    const students = await Student.find({ batch: b._id }).select('name roll rollTemporary demo person github photo.contentType').sort('roll').setOptions({ withDemo: true }).lean();
+    const st = await access.statusOf(students);   // the sign-in lives on the student's main record
+    const on = (s) => st.get(String(s._id))?.activated;
     const showCodes = mode === 'personal' && req.user.role !== 'viewer';
-    const codeOf = showCodes ? await codes.ensure(students.filter(s => !s.login?.activatedAt).map(s => s._id)) : new Map();
+    const codeOf = showCodes ? await codes.ensure(students.filter(s => !on(s)).map(s => s._id)) : new Map();
     res.json({ mode, joinCode: mode === 'batch' ? b.joinCode : null,
-      activated: students.filter(s => s.login?.activatedAt && !s.demo).length, total: students.filter(s => !s.demo).length,
+      activated: students.filter(s => on(s) && !s.demo).length, total: students.filter(s => !s.demo).length,
       students: students.map(s => ({ _id: s._id, name: s.name, roll: s.roll, rollTemporary: !!s.rollTemporary, github: s.github || '',
-        activated: !!s.login?.activatedAt, lastLoginAt: s.login?.lastLoginAt || null, hasPhoto: !!s.photo?.contentType, demo: !!s.demo,
+        activated: !!on(s), lastLoginAt: st.get(String(s._id))?.lastLoginAt || null, hasPhoto: !!s.photo?.contentType, demo: !!s.demo,
         ...(codeOf.has(String(s._id)) ? { setupCode: codeOf.get(String(s._id)) } : {}) })) });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -68,11 +72,16 @@ router.post('/student/:id/reset-password', protect, async (req, res) => {
     const s = await Student.findById(req.params.id);
     if (!s) return res.status(404).json({ message: 'Student not found' });
     if (!(await guard(req, res, s.batch))) return;
-    // the password goes, every sign-in of theirs ends, and a fresh personal code is made
+    // the password goes (one sign-in for every module), every sign-in of theirs ends, and a fresh personal code is made
     const setupCode = codes.make();
     s.login = { passwordHash: null, activatedAt: null, lastLoginAt: s.login?.lastLoginAt || null,
       setupCode, tokenVersion: (s.login?.tokenVersion || 0) + 1 };
     await s.save();
+    if (s.person) {
+      await Student.updateMany({ person: s.person, _id: { $ne: s._id } }, { $set: { 'login.passwordHash': null, 'login.activatedAt': null } }).setOptions({ withDemo: true });
+      await Person.updateOne({ _id: s.person }, { $set: { 'login.passwordHash': null, 'login.activatedAt': null } });
+      await access.bump(s.person);
+    }
     const mode = await codes.mode();
     res.json({ ok: true, setupCode: mode === 'personal' ? setupCode : null,
       message: mode === 'personal' ? `${s.name} can set up again with roll number + code ${setupCode}.` : `${s.name} can now set up again with the batch code.` });
@@ -85,7 +94,7 @@ router.post('/student/:id/new-code', protect, async (req, res) => {
     const s = await Student.findById(req.params.id).select('+login.passwordHash');
     if (!s) return res.status(404).json({ message: 'Student not found' });
     if (!(await guard(req, res, s.batch))) return;
-    if (s.login?.passwordHash) return res.status(400).json({ message: `${s.name} has already set up. Use Reset password instead.` });
+    if (s.login?.passwordHash || (await access.statusOf([s])).get(String(s._id))?.activated) return res.status(400).json({ message: `${s.name} has already set up. Use Reset password instead.` });
     const setupCode = codes.make();
     await Student.updateOne({ _id: s._id }, { $set: { 'login.setupCode': setupCode } });
     res.json({ ok: true, setupCode });

@@ -210,8 +210,9 @@ router.post('/sign-out-all', protect, superadminOnly, async (req, res) => {
       out.staff = ids.length;
     }
     if (students) {
-      const Student = require('../models/Student');
-      const r = await Student.updateMany({ 'login.activatedAt': { $ne: null } }, { $inc: { 'login.tokenVersion': 1 } }).setOptions({ withDemo: true });
+      const Student = require('../models/Student'), Person = require('../models/Person');
+      const r = await Person.updateMany({ 'login.activatedAt': { $ne: null } }, { $inc: { 'login.tokenVersion': 1 } });
+      await Student.updateMany({ 'login.tokenVersion': { $exists: true } }, { $inc: { 'login.tokenVersion': 1 } }).setOptions({ withDemo: true });   // older sign-ins too
       out.students = r.modifiedCount ?? r.nModified ?? 0;
     }
     res.json({ ok: true, ...out });

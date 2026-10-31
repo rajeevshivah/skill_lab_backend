@@ -83,7 +83,7 @@ router.get('/duplicates', protect, async (req, res) => {
     const filter = {};
     if (req.query.semester) filter.semester = req.query.semester;
     const students = await Student.find({ ...filter, roll: { $ne: '' } })
-      .select('name roll batch course sem section stats login.activatedAt createdAt')
+      .select('name roll batch course sem section stats person createdAt')
       .populate('batch', 'name track');
     const byRoll = {};
     for (const s of students) {
@@ -94,6 +94,7 @@ router.get('/duplicates', protect, async (req, res) => {
     const dupes = Object.values(byRoll).filter(list => list.length > 1);
     const ids = dupes.flat().map(s => s._id);
     const marks = await CycleMark.find({ student: { $in: ids }, status: 'evaluated' }).select('student').lean();
+    const signIn = await require('../services/studentAccess').statusOf(dupes.flat());
     const markCount = (id) => marks.filter(m => String(m.student) === String(id)).length;
     const groups = dupes.map(list => ({
         roll: list[0].roll,
@@ -101,7 +102,7 @@ router.get('/duplicates', protect, async (req, res) => {
         entries: list.sort((a, b) => a.createdAt - b.createdAt).map(s => ({
           studentId: s._id, name: s.name, course: s.course, sem: s.sem, section: s.section,
           batchId: s.batch?._id, batchName: s.batch?.name || '—', track: s.batch?.track || '',
-          marks: markCount(s._id), present: s.stats?.presentCount || 0, signedUp: !!s.login?.activatedAt,
+          marks: markCount(s._id), present: s.stats?.presentCount || 0, signedUp: !!signIn.get(String(s._id))?.activated,
         })),
       }));
     res.json({ groups, count: groups.length });
@@ -122,7 +123,13 @@ router.post('/:id/merge', protect, noCotrainer, async (req, res) => {
     const out = preview ? await studentMerge.preview(into, req.params.id) : await studentMerge.merge(into, req.params.id, req.user._id);
     if (!preview && dup.person) {   // the duplicate's own person (a second person made by mistake) goes if nothing else uses it
       const keep = await Student.findById(into).select('person').setOptions({ withDemo: true }).lean();
-      if (String(keep?.person || '') !== String(dup.person)) await people.afterRemove(dup.person);
+      if (String(keep?.person || '') !== String(dup.person)) {
+        const Person = require('../models/Person');
+        const [from, to] = await Promise.all([Person.findById(dup.person).select('+login.passwordHash').lean(), keep?.person && Person.findById(keep.person).select('+login.passwordHash').lean()]);
+        if (to && from?.login?.passwordHash && !to.login?.passwordHash)   // their sign-in moves with them
+          await Person.updateOne({ _id: to._id }, { $set: { 'login.passwordHash': from.login.passwordHash, 'login.activatedAt': from.login.activatedAt, 'login.lastLoginAt': from.login.lastLoginAt } });
+        await people.afterRemove(dup.person);
+      }
     }
     res.json(out);
   } catch (err) {
@@ -359,7 +366,8 @@ router.put('/:id', protect, async (req, res) => {
     existing.updatedBy = req.user._id;
     await existing.save();
     // the same name / roll on the student's main record and their other batch places
-    if (!existing.person || existing.name !== before.name || existing.roll !== before.roll) await people.syncIdentity(existing, req.user._id);
+    if (!existing.person || existing.name !== before.name || existing.roll !== before.roll || course !== undefined || sem !== undefined || section !== undefined)
+      await people.syncIdentity(existing, req.user._id);
     // Same photo on the Hall of Fame wherever this student is in a Top 3
     if (photo !== undefined) await require('../services/studentPhoto').sync(existing._id);
     res.json({ student: existing });

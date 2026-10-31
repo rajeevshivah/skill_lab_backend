@@ -474,6 +474,17 @@ async function syncIdentity(record, userId) {
   }
   const set = { name: record.name, roll: record.roll || '', rollTemporary: !!record.rollTemporary, updatedBy: userId };
   if (record.github) set['links.github'] = record.github;
+  // a course / semester filled in on the batch record → the main record gets its place, if it has none yet
+  const cur = await Person.findById(record.person).select('academic').lean();
+  if (cur && !cur.academic?.programme && record.course) {
+    const S = await loadStructure();
+    const pl = S.placeOf(record);
+    if (pl.prog) {
+      await S.save(userId);
+      Object.assign(set, { 'academic.programme': pl.prog._id, 'academic.branch': pl.branch, 'academic.cohort': pl.cohort?._id || null,
+        'academic.section': pl.section, 'academic.semesterNo': pl.semNo });
+    }
+  }
   await Person.updateOne({ _id: record.person }, { $set: set });
   await Student.updateMany({ person: record.person, _id: { $ne: record._id } }, { $set: { name: record.name, roll: record.roll, rollTemporary: !!record.rollTemporary } }).setOptions({ withDemo: true });
 }

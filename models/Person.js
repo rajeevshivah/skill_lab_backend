@@ -9,10 +9,9 @@ const mongoose = require('mongoose');
 //  a new batch next semester) and keeps one history across all four years.
 //
 //  Moving over in steps (see services/people.js):
-//    now   — persons are made from the training records; name + roll are
-//            copied here and refreshed from them; training still reads its own.
-//    later — adding/editing writes here first, screens read from here,
-//            and the student sign-in moves here (one login for all modules).
+//    now   — adding/editing goes through here (services/people.js), and the
+//            student sign-in lives here: one login for every module.
+//    later — staff screens read identity from here.
 // ─────────────────────────────────────────────────────────────────────
 const ID_TYPES = ['university', 'enrolment', 'admission', 'apaar', 'abc', 'other'];
 const STATUS   = ['studying', 'yearBack', 'onLeave', 'left', 'passedOut'];
@@ -41,14 +40,33 @@ const personSchema = new mongoose.Schema({
   contact: {
     email: { type: String, default: '', trim: true, lowercase: true, maxlength: 120 },
     phone: { type: String, default: '', trim: true, maxlength: 20 },
+    emailVerifiedAt: { type: Date, default: null },   // set by a one-time code (coming); until then "not verified"
+    phoneVerifiedAt: { type: Date, default: null },
   },
   links: {
     github:    { type: String, default: '', trim: true, maxlength: 200 },
     linkedin:  { type: String, default: '', trim: true, maxlength: 200 },
     portfolio: { type: String, default: '', trim: true, maxlength: 200 },
   },
+  // photo (file storage key, or inside the record when storage is not set up) — copied to every batch place
+  photo: {
+    data:        { type: String, default: null, select: false },
+    contentType: { type: String, default: null },
+    key:         { type: String, default: null },
+  },
   // the college's own extra fields (models/ProfileField.js): { key: value }
   custom: { type: mongoose.Schema.Types.Mixed, default: {} },
+
+  // THE student sign-in (one for every module) — services/studentAccess.js.
+  // Roll + password; the hash is never sent to anyone. tokenVersion bumps end every older sign-in.
+  login: {
+    passwordHash: { type: String, default: null, select: false },
+    activatedAt:  { type: Date, default: null },
+    lastLoginAt:  { type: Date, default: null },
+    tokenVersion: { type: Number, default: 0 },
+  },
+  // when the student agreed that the college uses their profile for training and placement
+  consents: { profileAt: { type: Date, default: null } },
 
   demo:      { type: Boolean, default: false },                // review account (from a demo training record)
   source:    { type: String, enum: ['training', 'import', 'staff', 'self', 'erp'], default: 'staff' },

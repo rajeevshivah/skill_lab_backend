@@ -189,7 +189,7 @@ admin(writeTool({
     if (!args.all_staff && !args.all_students) throw new ToolError('Say who: user, all_staff and/or all_students.');
     const users = args.all_staff ? await User.find(User.inOrg(org)).select('name platformOwner memberships') : [];
     const staffCount = users.filter(u => String(u._id) !== String(me._id) && !u.platformOwner && !(u.memberships || []).some(m => String(m.org) !== String(org))).length;
-    const studentCount = args.all_students ? await Student.countDocuments({ 'login.activatedAt': { $ne: null } }).setOptions({ withDemo: true }) : 0;
+    const studentCount = args.all_students ? await require('../models/Person').countDocuments({ 'login.activatedAt': { $ne: null } }) : 0;
     return {
       summary: `Sign out ${[args.all_staff && `${staffCount} staff login(s)`, args.all_students && `${studentCount} student(s)`].filter(Boolean).join(' and ')} on every device`,
       changes: { staff: args.all_staff ? staffCount : 0, students: studentCount, you: 'stay signed in', passwords: 'unchanged' },
@@ -768,7 +768,8 @@ anyone(writeTool({
     if (args.force && me.role !== 'superadmin') throw new ToolError('Only the admin can use force.');
     const CycleMark = require('../models/CycleMark');
     const DailyLog = require('../models/DailyLog');
-    const students = await Student.find({ _id: { $in: ids } }).select('name roll batch login.activatedAt').populate('batch', 'name').setOptions({ withDemo: true });
+    const students = await Student.find({ _id: { $in: ids } }).select('name roll batch person').populate('batch', 'name').setOptions({ withDemo: true });
+    const signIn = await require('../services/studentAccess').statusOf(students);
     const missing = ids.filter(id => !students.some(s => String(s._id) === id));
     if (missing.length) throw new ToolError(`Not found: ${missing.join(', ')}`);
     const problems = [], rows = [], warnings = ['This cannot be undone.'];
@@ -785,7 +786,7 @@ anyone(writeTool({
         problems.push(`${s.name} (${s.roll}) has ${marks} mark(s)${tops ? ` and ${tops} Top-3 place(s)` : ''} in ${s.batch?.name}` +
           (sameBatch ? ' and is in this batch twice — use merge_students' : ' — an admin can pass force=true to delete them anyway'));
       if (marks || tops) warnings.push(`${s.name}: ${marks} mark(s)${tops ? `, ${tops} Top-3 place(s)` : ''} will be deleted.`);
-      if (s.login?.activatedAt) warnings.push(`${s.name} had set up a student sign-in on this record; it will stop working.`);
+      if (!elsewhere.length && signIn.get(String(s._id))?.activated) warnings.push(`${s.name} has a student sign-in; with their only batch gone it stops working.`);
       if (!elsewhere.length) warnings.push(`${s.name} (${s.roll}) is in no other batch — after this they are not on the platform at all.`);
       rows.push({ id: String(s._id), name: s.name, roll: s.roll, batch: s.batch?.name, presentDays: present, marks, top3: tops,
         alsoIn: [...new Set(elsewhere.map(o => o.batch?.name).filter(Boolean))] });

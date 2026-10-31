@@ -15,10 +15,11 @@ async function mode() {
 
 // every not-yet-set-up student of these gets a code if they have none; returns Map id → code
 async function ensure(studentIds) {
-  const list = await Student.find({ _id: { $in: studentIds } }).select('+login.setupCode +login.passwordHash').setOptions({ withDemo: true });
+  const list = await Student.find({ _id: { $in: studentIds } }).select('+login.setupCode +login.passwordHash person').setOptions({ withDemo: true });
+  const st = await require('./studentAccess').statusOf(list);   // set up = their main record has a sign-in
   const out = new Map(), ops = [];
   for (const s of list) {
-    if (s.login?.passwordHash) continue;
+    if (s.login?.passwordHash || st.get(String(s._id))?.activated) continue;
     let c = s.login?.setupCode;
     if (!c) { c = make(); ops.push({ updateOne: { filter: { _id: s._id }, update: { $set: { 'login.setupCode': c } } } }); }
     out.set(String(s._id), c);

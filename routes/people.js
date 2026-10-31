@@ -115,11 +115,18 @@ router.get('/:id', readers, async (req, res) => {
     const p = await Person.findById(req.params.id).populate('academic.programme', 'name code').populate('academic.cohort', 'name admissionYear').lean();
     if (!p) return res.status(404).json({ message: 'Person not found' });
     const [places, fields] = await Promise.all([
-      Student.find({ person: p._id }).select('batch semester roll stats flagged').populate('batch', 'name track isActive').populate('semester', 'name status').setOptions({ withDemo: true }).lean(),
+      Student.find({ person: p._id }).select('batch semester roll stats flagged photo.contentType').populate('batch', 'name track isActive').populate('semester', 'name status').setOptions({ withDemo: true }).lean(),
       ProfileField.find({ isActive: true }).sort('group order label').lean(),
     ]);
+    const prof = require('../services/profile');
+    const hasPhoto = !!p.photo?.contentType || places.some(x => x.photo?.contentType);
     res.json({
-      person: { ...view(p), ids: p.ids, entry: p.academic?.entry, contact: p.contact, links: p.links, custom: p.custom || {}, source: p.source, createdAt: p.createdAt, updatedAt: p.updatedAt },
+      person: { ...view(p), ids: p.ids, entry: p.academic?.entry, contact: { email: p.contact?.email || '', phone: p.contact?.phone || '',
+          emailVerified: !!p.contact?.emailVerifiedAt, phoneVerified: !!p.contact?.phoneVerifiedAt },
+        links: p.links, custom: p.custom || {}, source: p.source, createdAt: p.createdAt, updatedAt: p.updatedAt,
+        signIn: { setUp: !!p.login?.activatedAt, lastSignedIn: p.login?.lastLoginAt || null },
+        profileConsentAt: p.consents?.profileAt || null,
+        profileComplete: prof.completion(p, fields.filter(f => f.editableBy === 'student'), hasPhoto) },
       places: places.map(s => ({ studentId: s._id, batch: s.batch?.name, track: s.batch?.track, batchActive: s.batch?.isActive !== false,
         semester: s.semester?.name, semesterActive: s.semester?.status === 'active', flagged: !!s.flagged,
         attendance: s.stats?.totalSessions ? Math.round(100 * s.stats.presentCount / s.stats.totalSessions) : null })),

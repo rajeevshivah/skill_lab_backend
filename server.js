@@ -11,6 +11,9 @@ async function start() {
 
   // Colleges: create the first one and move old records into it (only fills gaps).
   await require('./services/orgMigration').migrate();
+  // Student sign-ins live on the student's main record now: copy any older per-batch ones over (only fills gaps).
+  try { const r = await require('./services/studentAccess').moveLogins({ all: true }); if (r.moved) console.log(`[students] ${r.moved} sign-ins moved to the main record`); }
+  catch (e) { console.error('[students] moving sign-ins:', e.message); }
 
   // Seed the first superadmin ONLY when the database has none AND a password is
   // supplied through the environment. No credential is hardcoded here, and

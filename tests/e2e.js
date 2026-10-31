@@ -109,7 +109,7 @@ const step = (t) => console.log('\n— ' + t);
     const rr = await http('POST', '/api/student/activate', { body: { roll: s.roll, code: String(s.batch) === String(A._id) ? codeA : codeB, password: 'secret12' } });
     if (rr.status !== 201) ok(`activate ${s.roll}`, false, rr.body);
   }
-  ok('all 12 students set up', (await M('Student').countDocuments({ 'login.activatedAt': { $ne: null } })) === 12);
+  ok('all 12 students set up (one sign-in each, on their main record)', (await M('Person').countDocuments({ 'login.activatedAt': { $ne: null } })) === 12);
   const stok = async (s) => (await http('POST', '/api/student/login', { body: { roll: s.roll, password: 'secret12' } })).body.token;
 
   // ═════════ CLASS DAYS ═════════
