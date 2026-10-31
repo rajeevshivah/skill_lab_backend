@@ -40,7 +40,7 @@ app.use(resolveOrg);
 // ── Routes ────────────────────────────────────────────────────────
 // A module the college has not bought answers 403 (Organization.modules).
 const training = requireModule('training'), fame = requireModule('hallOfFame'),
-  studentApp = requireModule('studentApp'), ai = requireModule('ai');
+  studentApp = requireModule('studentApp'), ai = requireModule('ai'), placement = requireModule('placement');
 const fameOnly = (req, res, next) => /^\/(halloffame|[a-f0-9]{24}\/photo)/.test(req.path) ? fame(req, res, next) : next();
 
 app.use('/api/org',       require('./routes/org'));            // which college this address opens (public)
@@ -61,6 +61,10 @@ app.use('/api/cycleplans', training, require('./routes/cycleplans'));
 app.use('/api/search',    training, require('./routes/search'));
 app.use('/api/performance', training, require('./routes/performance'));
 app.use('/api/tokens',    ai, require('./routes/tokens'));     // MCP tokens for AI apps
+// placement module: officer side, student side (before /api/student), and the public card of a shared link
+app.use('/api/placement', placement, require('./routes/placement'));
+app.use('/api/student/placement', placement, require('./routes/studentPlacement'));
+app.use('/api/placement-public', require('./routes/studentPlacement').publicRouter);
 app.use('/api/student',   studentApp, require('./routes/student'));        // students: sign-in, my cycle, submit, pulse, feedback
 app.use('/api/student-admin', studentApp, require('./routes/studentAdmin')); // staff: join codes, resets, submissions, pulse totals
 app.use('/api/feedback',  studentApp, require('./routes/feedback'));       // trainer feedback windows + results

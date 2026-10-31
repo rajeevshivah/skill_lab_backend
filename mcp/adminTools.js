@@ -130,7 +130,7 @@ admin(writeTool({
   input: {
     name: z.string().min(2).max(80),
     email: z.string().email(),
-    role: z.enum(['trainer', 'cotrainer', 'superadmin']).optional().describe('Default trainer'),
+    role: z.enum(['trainer', 'cotrainer', 'superadmin', 'placement']).optional().describe('Default trainer. placement = placement officer (sees only the placement section)'),
   },
   async plan(args, user, ctx) {
     const email = args.email.trim().toLowerCase();
@@ -209,7 +209,7 @@ admin(writeTool({
   input: {
     user: z.string().describe('Email (best), name, or id'),
     name: z.string().min(2).max(80).optional(),
-    role: z.enum(['trainer', 'cotrainer', 'superadmin']).optional(),
+    role: z.enum(['trainer', 'cotrainer', 'superadmin', 'placement']).optional(),
     active: z.boolean().optional().describe('false = deactivate (reversible)'),
     reset_password: z.boolean().optional(),
   },

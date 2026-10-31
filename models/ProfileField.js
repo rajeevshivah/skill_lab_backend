@@ -8,7 +8,7 @@ const mongoose = require('mongoose');
 //    editableBy        — who may fill it: staff only, or the student too
 //    needsVerification — a student-filled value counts only once staff check it
 // ─────────────────────────────────────────────────────────────────────
-const TYPES = ['text', 'number', 'date', 'select', 'multiselect', 'boolean', 'url'];
+const TYPES = ['text', 'number', 'date', 'select', 'multiselect', 'boolean', 'url', 'file'];   // file: a Document id (marksheet …)
 
 const profileFieldSchema = new mongoose.Schema({
   key:      { type: String, required: true, trim: true, lowercase: true, match: /^[a-z][a-z0-9_]{1,39}$/ },

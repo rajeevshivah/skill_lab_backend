@@ -20,6 +20,7 @@ async function load() {
   const orgs = await Organization.find().lean();
   const next = { at: Date.now(), byHost: new Map(), byId: new Map(), bySlug: new Map() };
   for (const o of orgs) {
+    o.modules = Organization.modulesOf(o.modules);   // a module saved before it existed = its default
     next.byId.set(String(o._id), o); next.bySlug.set(o.slug, o);
     for (const h of o.hosts || []) next.byHost.set(h, o);
   }

@@ -170,7 +170,7 @@ async function frame(req) {
   return {
     person: { id: req.person._id, name: req.person.name, roll: req.person.roll, rollTemporary: !!req.person.rollTemporary, hasPhoto, photo: photo || null },
     places: req.places, place: req.student ? String(req.student._id) : null,
-    modules: { training: org?.modules?.training !== false },
+    modules: { training: org?.modules?.training !== false, placement: Organization.modulesOf(org?.modules).placement },
     college: { name: org?.shortName || org?.name || '', programName: org?.programName || 'Skill Lab' },
     profile: profile.completion(req.person, fields, hasPhoto),
     demo: req.demo,

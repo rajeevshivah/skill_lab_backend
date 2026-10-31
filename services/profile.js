@@ -63,6 +63,7 @@ function view(person, fields, hasPhoto) {
     email: person.contact?.email || '', emailVerified: !!person.contact?.emailVerifiedAt,
     github: person.links?.github || '', linkedin: person.links?.linkedin || '', portfolio: person.links?.portfolio || '',
     custom: Object.fromEntries(fields.map(f => [f.key, person.custom?.[f.key] ?? null])),
+    verified: Object.fromEntries(fields.filter(f => person.verified?.[f.key]).map(f => [f.key, true])),
     fields: fields.map(f => ({ key: f.key, label: f.label, type: f.type, options: f.options, group: f.group, help: f.help, required: f.required, min: f.min, max: f.max, needsVerification: f.needsVerification })),
     consentGiven: !!person.consents?.profileAt,
     completion: completion(person, fields, hasPhoto),
@@ -81,7 +82,18 @@ async function changesFrom(person, body, fields) {
   if (body.custom !== undefined) {
     const { values, errors } = people.checkCustom(fields, body.custom || {}, { asStudent: true });
     if (errors.length) throw new ProfileError(errors.join(' '));
-    for (const [k, v] of Object.entries(values)) set[`custom.${k}`] = v;
+    const fileKeys = Object.keys(values).filter(k => values[k] && fields.find(f => f.key === k)?.type === 'file');
+    if (fileKeys.length) {   // a file field must point at the student's own upload
+      const Document = require('../models/Document');
+      const mine = new Set((await Document.find({ _id: { $in: fileKeys.map(k => values[k]) }, owner: person._id }).select('_id').lean()).map(d => String(d._id)));
+      const bad = fileKeys.filter(k => !mine.has(String(values[k])));
+      if (bad.length) throw new ProfileError('Upload the file again, please.');
+    }
+    for (const [k, v] of Object.entries(values)) {
+      set[`custom.${k}`] = v;
+      // a changed value is not checked by the college any more
+      if (JSON.stringify(v) !== JSON.stringify(person.custom?.[k] ?? null) && person.verified?.[k]) set[`verified.${k}`] = null;
+    }
   }
   if (!person.consents?.profileAt) {
     if (body.consent !== true) throw new ProfileError('Please tick that you agree your college may use these details for training and placement.');

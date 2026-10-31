@@ -51,7 +51,7 @@ router.get('/orgs', async (req, res) => {
   try {
     const orgs = await Organization.find().sort('name').lean();
     const use = await usage(orgs.map(o => o._id));
-    res.json({ orgs: orgs.map(o => ({ ...o, usage: use.get(String(o._id)) })), modules: Organization.MODULES });
+    res.json({ orgs: orgs.map(o => ({ ...o, modules: Organization.modulesOf(o.modules), usage: use.get(String(o._id)) })), modules: Organization.MODULES });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 

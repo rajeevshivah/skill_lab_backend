@@ -41,6 +41,9 @@ exports.protect = async (req, res, next) => {
     const role = exports.roleIn(user, org);
     if (!role) return res.status(401).json({ message: org ? 'Your account is not active for this college.' : 'This address is not linked to a college.' });
     req.user = exports.asRequestUser(user, role, org);
+    // the placement officer works only in placement (and the student list it needs) — never training
+    if (role === 'placement' && !exports.PLACEMENT_PATHS.some(p => req.originalUrl.startsWith(p)))
+      return res.status(403).json({ message: 'This is a placement account — it opens the placement section only.' });
     // (their own AI connection tokens are the one thing they may create/revoke)
     if (role === 'viewer' && !['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !req.originalUrl.startsWith('/api/tokens'))
       return res.status(403).json({ message: 'This is a read-only (management) account.' });
@@ -49,6 +52,10 @@ exports.protect = async (req, res, next) => {
     res.status(401).json({ message: 'Invalid token' });
   }
 };
+
+exports.PLACEMENT_PATHS = ['/api/placement', '/api/auth', '/api/tokens', '/api/people', '/api/academics'];
+// placement module: admin and placement officers change; management reads
+exports.placementStaff = (req, res, next) => ['superadmin', 'placement', 'viewer'].includes(req.user.role) ? next() : res.status(403).json({ message: 'Placement team only' });
 
 // Admin and management (viewer) read every batch of the college.
 exports.seesAll = (user) => user.role === 'superadmin' || user.role === 'viewer';

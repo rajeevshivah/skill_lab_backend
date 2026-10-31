@@ -12,7 +12,7 @@ const Person    = require('../models/Person');
 const { protect, superadminOnly } = require('../middleware/auth');
 const router    = express.Router();
 
-const readers = (req, res, next) => ['superadmin', 'viewer'].includes(req.user.role) ? next() : res.status(403).json({ message: 'Admin or management only' });
+const readers = (req, res, next) => ['superadmin', 'viewer', 'placement'].includes(req.user.role) ? next() : res.status(403).json({ message: 'Admin, placement or management only' });
 const oid = (v) => mongoose.isValidObjectId(v);
 const fail = (res, err) => res.status(err.name === 'ValidationError' || err.code === 11000 || err.status === 400 ? 400 : 500)
   .json({ message: err.code === 11000 ? 'That already exists.' : err.message });

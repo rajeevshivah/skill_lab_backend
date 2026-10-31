@@ -6,7 +6,7 @@ const mongoose = require('mongoose');
 //   modules — what the college has bought; a switched-off module disappears
 //             from its menus and its API answers 403
 //   status  — 'suspended' blocks the college (subscription ended), data kept
-const MODULES = ['training', 'hallOfFame', 'studentApp', 'ai'];
+const MODULES = ['training', 'hallOfFame', 'studentApp', 'ai', 'placement'];
 
 const organizationSchema = new mongoose.Schema({
   name:        { type: String, required: true, trim: true },          // "SHEAT College of Engineering"
@@ -19,6 +19,7 @@ const organizationSchema = new mongoose.Schema({
     hallOfFame: { type: Boolean, default: true },
     studentApp: { type: Boolean, default: true },
     ai:         { type: Boolean, default: true },
+    placement:  { type: Boolean, default: false },   // drives, applications (sold alone or with training)
   },
   status:      { type: String, enum: ['active', 'suspended'], default: 'active' },
   plan: {
@@ -54,6 +55,11 @@ organizationSchema.index({ hosts: 1 });
 organizationSchema.path('hosts').set(list => [...new Set((list || []).map(h => String(h).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/[:/].*$/, '')).filter(Boolean))]);
 
 organizationSchema.statics.MODULES = MODULES;
+// Every module switch with its default filled in (a college saved before a module
+// existed has no value for it — that means the module's default, e.g. placement off).
+organizationSchema.statics.modulesOf = function (m = {}) {
+  return Object.fromEntries(MODULES.map(k => [k, typeof m?.[k] === 'boolean' ? m[k] : !!organizationSchema.path(`modules.${k}`).defaultValue]));
+};
 // What the website may see about a college before anyone signs in.
 organizationSchema.methods.publicView = function () {
   return { id: this._id, name: this.name, shortName: this.shortName || this.name, programName: this.programName,

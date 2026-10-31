@@ -146,6 +146,10 @@ function checkCustom(fields, input, { asStudent = false } = {}) {
         if (!/^https?:\/\/\S+$/i.test(String(raw)) || String(raw).length > 300) { errors.push(`${f.label} must be a web link (https://…).`); continue; }
         v = String(raw);
         break;
+      case 'file':   // an uploaded Document's id (whose it is, is checked by the caller)
+        if (!/^[a-f0-9]{24}$/i.test(String(raw))) { errors.push(`${f.label}: upload the file first.`); continue; }
+        v = String(raw);
+        break;
       default:
         v = String(raw).slice(0, 500);
     }

@@ -16,7 +16,9 @@ const { protect, superadminOnly } = require('../middleware/auth');
 const people    = require('../services/people');
 const router    = express.Router();
 
-const readers = (req, res, next) => ['superadmin', 'viewer'].includes(req.user.role) ? next() : res.status(403).json({ message: 'Admin or management only' });
+const readers = (req, res, next) => ['superadmin', 'viewer', 'placement'].includes(req.user.role) ? next() : res.status(403).json({ message: 'Admin, placement or management only' });
+// admin, or the placement officer (marks, verification, placement fields)
+const editors = (req, res, next) => ['superadmin', 'placement'].includes(req.user.role) ? next() : res.status(403).json({ message: 'Admin or placement officer only' });
 const rx = (s) => new RegExp(String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
 const oid = (v) => mongoose.isValidObjectId(v);
 const fail = (res, err) => res.status(err instanceof people.LinkError || err.name === 'ValidationError' || err.code === 11000 ? 400 : 500)
@@ -41,7 +43,7 @@ const fieldInput = (b) => {
 const optionsOk = (f) => !['select', 'multiselect'].includes(f.type) || f.options.length > 0;
 
 // POST /api/people/fields  { key, label, type, options[], group, editableBy, needsVerification, … }
-router.post('/fields', superadminOnly, async (req, res) => {
+router.post('/fields', editors, async (req, res) => {
   try {
     const f = new ProfileField({ key: req.body.key, ...fieldInput(req.body), createdBy: req.user._id });
     if (!optionsOk(f)) return res.status(400).json({ message: 'A choice field needs its options.' });
@@ -51,7 +53,7 @@ router.post('/fields', superadminOnly, async (req, res) => {
 });
 
 // PATCH /api/people/fields/:id — the key and type stay (saved values depend on them)
-router.patch('/fields/:id', superadminOnly, async (req, res) => {
+router.patch('/fields/:id', editors, async (req, res) => {
   try {
     if (!oid(req.params.id)) return res.status(400).json({ message: 'Bad id' });
     const f = await ProfileField.findById(req.params.id);
@@ -136,7 +138,7 @@ router.get('/:id', readers, async (req, res) => {
 });
 
 // PATCH /api/people/:id  { programme, branch, cohort, section, semesterNo, entry, status, contact{}, links{}, ids[], custom{} }
-router.patch('/:id', superadminOnly, async (req, res) => {
+router.patch('/:id', editors, async (req, res) => {
   try {
     if (!oid(req.params.id)) return res.status(400).json({ message: 'Bad id' });
     const p = await Person.findById(req.params.id);
@@ -189,9 +191,13 @@ router.patch('/:id', superadminOnly, async (req, res) => {
       const fields = await ProfileField.find({}).lean();
       const { values, errors } = people.checkCustom(fields, b.custom);
       if (errors.length) return res.status(400).json({ message: errors.join(' ') });
-      const next = { ...(p.custom || {}) };
-      for (const [k, v] of Object.entries(values)) { if (v === null) delete next[k]; else next[k] = v; }
+      const next = { ...(p.custom || {}) }, ver = { ...(p.verified || {}) };
+      for (const [k, v] of Object.entries(values)) {
+        if (v === null) { delete next[k]; delete ver[k]; }
+        else { next[k] = v; ver[k] = { at: new Date(), by: req.user._id }; }   // typed in by staff = checked
+      }
       p.custom = next; p.markModified('custom');
+      p.verified = ver; p.markModified('verified');
     }
     p.updatedBy = req.user._id;
     await p.save();

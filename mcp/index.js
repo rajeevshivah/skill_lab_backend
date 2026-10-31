@@ -23,8 +23,9 @@ const { writeTools } = require('./writeTools');
 const { adminTools } = require('./adminTools');
 const { opsTools }   = require('./opsTools');
 const { coreTools }  = require('./coreTools');
+const { placementTools } = require('./placementTools');
 const jwt = require('jsonwebtoken');
-const tools = [...readTools, ...writeTools, ...adminTools, ...opsTools, ...coreTools];
+const tools = [...readTools, ...writeTools, ...adminTools, ...opsTools, ...coreTools, ...placementTools];
 
 // Lets a tool call an EXISTING website route inside this server, as the
 // current user — so admin tools reuse every website rule unchanged.
@@ -69,7 +70,17 @@ const instructions = (org) =>
   'Cycles are created ONLY with plan_cycles (groups of batches, dates, project days, holidays → dated empty plan rows). ' +
   'Meetings: get_meeting_day (daily review), get_cycle_review (end-of-cycle, per trainer), add_meeting_note / update_meeting_note. ' +
   'Holidays: add_holiday (shift or mark) / undo_holiday; timetables: get_timetables / set_timetable. ' +
+  'Placement (when the college has it): placement_setup, list_drives, get_drive, list_applicants, save_company, save_drive (e.g. from a JD the user ' +
+  'pastes — read it and fill the fields), set_drive_status, drive_share (link + WhatsApp message), verify_student_values, import_marks. ' +
   'When create_user or update_user returns a temporaryPassword, show it to the user once and remind them to share it privately.';
+
+const PLACEMENT_ROLES = ['superadmin', 'placement', 'viewer'];
+function visible(tool, req) {
+  const placementOn = require('../models/Organization').modulesOf(req.org?.modules).placement;
+  if (tool.placement) return placementOn && PLACEMENT_ROLES.includes(req.user.role);
+  if (req.user.role === 'placement') return tool.name === 'whoami';
+  return true;
+}
 
 // Wraps a handler: runs it, writes an audit row, converts the result into
 // the MCP response shape, and turns errors into readable tool errors.
@@ -80,6 +91,7 @@ function wrap(tool, req) {
     let kind = tool.write ? 'preview' : 'read';
     try {
       if (tool.admin && req.user.role !== 'superadmin') throw new ToolError('Superadmin only.');
+      if (!visible(tool, req)) throw new ToolError('Not available for this account.');
       if (tool.write && req.user.role === 'viewer') throw new ToolError('This is a read-only (management) account.');
       const data = await tool.handler(args || {}, req.user, { api: req.mcpApi });
       if (tool.write && data?.mode === 'saved') kind = 'write';
@@ -112,8 +124,9 @@ function buildServer(req) {
     { instructions: instructions(req.org) }
   );
   req.mcpApi = makeApi(req);
-  // Trainers never even see admin tools; management (viewer) sees read tools only.
-  const shown = tools.filter(t => (!t.admin || req.user.role === 'superadmin') && (!t.write || req.user.role !== 'viewer'));
+  // Trainers never even see admin tools; management (viewer) sees read tools only;
+  // placement tools only where the college has placement; a placement officer sees only those.
+  const shown = tools.filter(t => (!t.admin || req.user.role === 'superadmin') && (!t.write || req.user.role !== 'viewer') && visible(t, req));
   for (const tool of shown) {
     server.registerTool(tool.name, {
       title: tool.title,

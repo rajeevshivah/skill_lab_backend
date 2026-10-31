@@ -56,6 +56,9 @@ const personSchema = new mongoose.Schema({
   },
   // the college's own extra fields (models/ProfileField.js): { key: value }
   custom: { type: mongoose.Schema.Types.Mixed, default: {} },
+  // which of those values the college has checked: { key: { at, by } }. A student changing a
+  // checked value makes it unchecked again (services/profile.js).
+  verified: { type: mongoose.Schema.Types.Mixed, default: {} },
 
   // THE student sign-in (one for every module) — services/studentAccess.js.
   // Roll + password; the hash is never sent to anyone. tokenVersion bumps end every older sign-in.

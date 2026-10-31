@@ -1,7 +1,8 @@
 const mongoose = require('mongoose');
 const bcrypt   = require('bcryptjs');
 
-const ROLES = ['superadmin', 'trainer', 'cotrainer', 'viewer'];
+// placement: the placement officer — sees only the placement module
+const ROLES = ['superadmin', 'trainer', 'cotrainer', 'viewer', 'placement'];
 
 const userSchema = new mongoose.Schema({
   name:     { type: String, required: true, trim: true },
