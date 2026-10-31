@@ -41,7 +41,7 @@ async function ensureStandardFields(userId = null) {
 
 async function context() {
   const [programmes, cohorts, fields] = await Promise.all([
-    Programme.find({}).select('name code durationYears').lean(),
+    Programme.find({}).select('name code durationYears branches.code').lean(),
     Cohort.find({}).select('programme branch admissionYear').lean(),
     ProfileField.find({}).lean(),
   ]);
@@ -64,7 +64,13 @@ function inAudience(drive, person, ctx) {
   if ((person.status || 'studying') !== 'studying') return false;
   const a = drive.audience || {};
   if (a.programmes?.length && !a.programmes.some(x => String(x) === String(person.academic?.programme))) return false;
-  if (a.branches?.length && !a.branches.includes(person.academic?.branch || '')) return false;
+  // branches narrow only the programmes they belong to: "B.Tech CSE + BCA" keeps every BCA student
+  if (a.branches?.length) {
+    const prog = ctx.prog.get(String(person.academic?.programme));
+    const own = (prog?.branches || []).map(b => b.code);
+    if (a.branches.some(b => own.includes(b))) { if (!a.branches.includes(person.academic?.branch || '')) return false; }
+    else if (!a.programmes?.length) return false;   // "CSE" alone = CSE students only; a programme without those branches must be picked by name
+  }
   if (a.passingYears?.length && !a.passingYears.includes(passingYear(person, ctx))) return false;
   return true;
 }

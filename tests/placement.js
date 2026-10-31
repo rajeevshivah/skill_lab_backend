@@ -259,6 +259,20 @@ const EXE = 'data:application/pdf;base64,' + Buffer.from('MZ\x90\x00 not a pdf')
   await cPo.close(); await cTr.close(); await cAd.close();
   await new Promise(r => setTimeout(r, 500));   // let the AI-tool audit rows finish writing
 
+  step('Branches narrow only their own programme');
+  {
+    const E = require('../services/eligibility');
+    const ctx = { prog: new Map([['b', { durationYears: 4, branches: [{ code: 'CSE' }, { code: 'ME' }] }], ['c', { durationYears: 3, branches: [] }]]),
+      cohort: new Map([['cb', { admissionYear: 2023 }], ['cc', { admissionYear: 2024 }]]), field: new Map() };
+    const d = { audience: { programmes: ['b', 'c'], branches: ['CSE'], passingYears: [2027] } };
+    const P = (prog, branch, cohort) => ({ academic: { programme: prog, branch, cohort } });
+    ok('B.Tech CSE + BCA: a BCA final-year student sees it', E.inAudience(d, P('c', '', 'cc'), ctx));
+    ok('B.Tech CSE + BCA: a B.Tech CSE student sees it', E.inAudience(d, P('b', 'CSE', 'cb'), ctx));
+    ok('B.Tech CSE + BCA: a B.Tech ME student does not', !E.inAudience(d, P('b', 'ME', 'cb'), ctx));
+    ok('B.Tech CSE + BCA: a B.Tech student with no branch does not', !E.inAudience(d, P('b', '', 'cb'), ctx));
+    ok('CSE alone (no programme picked): a BCA student does not', !E.inAudience({ audience: { programmes: [], branches: ['CSE'], passingYears: [] } }, P('c', '', 'cc'), ctx));
+  }
+
   step('Every query works on real MongoDB');
   ok('no query asks for a path and its parent together', collisions.length === 0, [...new Set(collisions)]);
 
